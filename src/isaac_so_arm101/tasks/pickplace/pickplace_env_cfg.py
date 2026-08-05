@@ -175,12 +175,14 @@ class RewardsCfg:
         weight=3.0,
     )
 
-    # BOOTSTRAP ONLY — decayed to 1.0 by the curriculum. At a high standing weight
-    # this term is a risk-free annuity for holding the cube in the air forever
-    # (the observed frozen-hold pose): descending costs it immediately, while the
-    # place terms only pay once the cube is down, still and released. Keep it just
-    # strong enough to discover the pick, then get it out of the way.
-    lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=5.0)
+    # Weight 15 and NOT decayed. Cutting this to 5 (+decay to 1) killed the pick
+    # outright — lifting_object never left 1e-7 and nothing downstream ever fired,
+    # while runs that lifted reliably all had 15 under identical action penalties.
+    # The frozen-hold this was meant to fix was a PATH problem (the gradient pointed
+    # backward mid-descent), and latch-gating object_goal_tracking already fixes it:
+    # holding aloft pays ~30, placed pays ~70, and the path between is monotonic.
+    # Suppressing the lift signal was never part of that fix.
+    lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=15.0)
 
     # Latch-gated (see mdp.object_goal_distance): pays continuously from pick all
     # the way down to the cube resting on the target, so the descent is monotonic.
@@ -317,19 +319,17 @@ class CurriculumCfg:
         func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
     )
 
-    # Fade the lift bootstrap once the pick is learned. Holding the cube aloft is
-    # otherwise a risk-free standing reward that beats placing (descending forfeits
-    # it before the place terms pay out), which is exactly the frozen-hold pose the
-    # policy converged to. Decayed rather than removed so the pick stays supported.
-    # num_steps is the key knob: too early and the pick isn't learned yet; too late
-    # and it wastes iterations holding. Tune from the run.
-    # The goal-tracking decay terms are GONE on purpose: now that tracking is
-    # latch-gated it pays through the descent instead of fighting it, so there is
-    # nothing left to switch off.
-    decay_lifting = CurrTerm(
-        func=mdp.modify_reward_weight,
-        params={"term_name": "lifting_object", "weight": 1.0, "num_steps": 12000},
-    )
+    # No reward decays here on purpose. Every decay tried on this task fired before
+    # the behaviour it was fading had actually been learned, and killed it:
+    #   - decaying object_goal_tracking to 0 removed the only pull toward the target
+    #     and turned lifting_object into a hold-forever annuity (the frozen pose);
+    #   - decaying lifting_object to 1 at iteration ~460 destroyed the pick entirely.
+    # Latch-gated tracking makes the whole trajectory monotonic, so nothing needs
+    # switching off to force the place.
+    #
+    # WATCH THE UNITS if a decay is ever reintroduced: modify_reward_weight's
+    # num_steps counts ENVIRONMENT steps, ~24 per training iteration. num_steps=12000
+    # fired at iteration ~500, not 12000 — a third of the way into a 1500-iter run.
 
 
 ##
