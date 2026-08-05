@@ -86,3 +86,165 @@ def object_ee_distance_and_lifted(
     lift_reward = object_is_lifted(env, minimal_height, object_cfg)
     # Combine rewards multiplicatively
     return reach_reward * lift_reward
+
+
+# ---------------------------------------------------------------------------
+# PickPlace authorship — the place / release / at-rest terms.
+# These are the reward functions that turn "lift" into "place". They are STUBS:
+# fill them in. Spec + trap catalogue: SOARMRL/docs/pickplace_contract.md
+# (Increment 1). Weight them so place/release DOMINATE the surviving reach
+# term, or the arm hovers the cube forever instead of setting it down.
+# ---------------------------------------------------------------------------
+
+
+def object_at_target_on_table(
+    env: ManagerBasedRLEnv,
+    xy_std: float,
+    z_std: float,
+    command_name: str,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Reward the cube being at the commanded XY *and* down at table height.
+
+    This is the term that replaces the airborne ``object_goal_distance`` gate —
+    it must stay alive as the cube DESCENDS to the table, otherwise the policy
+    is punished for finishing the place (the core blocker, contract §"The
+    blocker you must design around").
+
+    What to compute (reuse the ``object_goal_distance`` pattern above):
+      - Desired pos in world frame: transform ``command[:, :3]`` by the robot
+        root state (``combine_frame_transforms``), exactly like
+        ``object_goal_distance`` lines 65-68.
+      - XY reward: tanh-kernel on the *planar* distance to the target
+        (``des_pos_w[:, :2]`` vs ``object.data.root_pos_w[:, :2]``), std ``xy_std``.
+      - Z gate: the cube is at table height, i.e. ``|object_z - target_z| < z_tol``.
+        Do NOT gate on ``> minimal_height`` — that is the airborne gate you are
+        replacing. The place target z is the cube's resting center (~0.015 for
+        the 3 cm cube; verify in sim).
+
+    Invariant: this reward must be MAXIMAL when the cube is correctly placed at
+    rest on the table, not zero. Watch the play render for the yank-back-up
+    symptom that means the airborne term is still winning.
+    """
+    # extract the used quantities (to enable type-hinting)
+    robot: RigidObject = env.scene[robot_cfg.name]
+    object: RigidObject = env.scene[object_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    
+    # compute the desired position in the world frame
+    des_pos_b = command[:, :3]
+    des_pos_w, _ = combine_frame_transforms(robot.data.root_state_w[:, :3], robot.data.root_state_w[:, 3:7], des_pos_b)
+    
+    # XY reward: tanh-kernel on the *planar* distance to the target
+    distance_xy = torch.norm(des_pos_w[:, :2] - object.data.root_pos_w[:, :2], dim=1)
+    xy_reward = 1.0 - torch.tanh(distance_xy / xy_std)
+    
+    # Z reward: the cube is at table height
+    distance_z = torch.abs(object.data.root_pos_w[:, 2] - des_pos_w[:, 2])
+    z_reward = 1.0 - torch.tanh(distance_z / z_std)
+    
+    return z_reward * xy_reward
+
+
+def object_released(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    lin_vel_thresh: float,
+    xy_std: float,
+    z_std: float,
+    gripper_open_thresh: float,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["gripper"]),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Reward opening the gripper once the cube is placed and nearly still.
+
+    The point of this term: the task is not done until the gripper LETS GO.
+    Gate release on low object velocity so the policy cannot farm it by
+    dropping the cube from height (the "early drop" trap).
+
+    What to compute:
+      - Gripper openness: read the gripper joint position from the robot
+        articulation. ``robot_cfg`` already selects the gripper joint — get its
+        index via ``robot_cfg.joint_ids`` and read
+        ``robot.data.joint_pos[:, gripper_idx]``. Open ⇔ position past
+        ``gripper_open_thresh`` (binary action commands open=0.5/close=0.0, so a
+        threshold near the mid-point works; confirm the sign on your arm).
+      - At target: cube within ``xy_std``/``z_tol`` of the commanded spot
+        (same as ``object_at_target_on_table`` — you can call it or inline it).
+      - Nearly still: ``torch.norm(object.data.root_lin_vel_w, dim=1) < vel_thresh``.
+      - Reward = the AND of (open) AND (at target) AND (still). Multiplicative
+        gating keeps it un-farmable.
+
+    Trap: if the policy releases early to grab this reward, tighten ``vel_thresh``
+    or add an impact-speed penalty (a separate term). Contract §Increment 1.
+    """
+    # extract the used quantities (to enable type-hinting)
+    robot: RigidObject = env.scene[robot_cfg.name]
+    object: RigidObject = env.scene[object_cfg.name]
+    
+    # Gripper openness
+    gripper_idx = robot_cfg.joint_ids[0]  # assuming single gripper joint
+    gripper_pos = robot.data.joint_pos[:, gripper_idx]
+    gripper_open = (gripper_pos > gripper_open_thresh).float()
+    
+    # At target
+    at_target = object_at_target_on_table(
+        env=env,
+        xy_std=xy_std,
+        z_std=z_std,
+        command_name=command_name,
+        robot_cfg=robot_cfg,
+        object_cfg=object_cfg,
+    )
+    
+    # Nearly still
+    linear_vel = torch.norm(object.data.root_lin_vel_w, dim=1)
+    still_check = (linear_vel < lin_vel_thresh).float()
+    
+    # Reward = AND of all three
+    return gripper_open * at_target * still_check
+
+def object_at_rest(
+    env: ManagerBasedRLEnv,
+    lin_vel_thresh: float,
+    ang_vel_thresh: float,
+    command_name: str,
+    xy_std: float,
+    z_std: float,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Reward the cube being at rest — low linear AND angular velocity.
+
+    Distinguishes "placed and settled" from "still being held / dragged / in
+    flight". Use both ``object.data.root_lin_vel_w`` and
+    ``object.data.root_ang_vel_w`` (a spun/toppling cube is not placed).
+
+    Keep this a gentle shaping term, not a dominant one — on its own it rewards
+    the arm for simply not touching the cube. It earns its weight only in
+    combination with the at-target term (a still cube in the WRONG place should
+    not score well), so consider multiplying by the at-target gate rather than
+    summing this in raw.
+    """
+    # extract the used quantities (to enable type-hinting)
+    object: RigidObject = env.scene[object_cfg.name]
+    
+    # Linear velocity
+    linear_vel = torch.norm(object.data.root_lin_vel_w, dim=1)
+    linear_vel_check = (linear_vel < lin_vel_thresh).float()
+    
+    # Angular velocity
+    angular_vel = torch.norm(object.data.root_ang_vel_w, dim=1)
+    angular_vel_check = (angular_vel < ang_vel_thresh).float()
+    
+    object_at_target = object_at_target_on_table(
+        env=env,
+        xy_std=xy_std,
+        z_std=z_std,
+        command_name=command_name,
+        robot_cfg=robot_cfg,
+        object_cfg=object_cfg,
+    )
+    # Reward = AND of both
+    return linear_vel_check * angular_vel_check * object_at_target

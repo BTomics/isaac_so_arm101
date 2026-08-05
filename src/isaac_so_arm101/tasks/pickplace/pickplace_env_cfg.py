@@ -97,7 +97,9 @@ class CommandsCfg:
         ranges=mdp.UniformPoseCommandCfg.Ranges(
             pos_x=(-0.1, 0.1),
             pos_y=(-0.3, -0.1),
-            pos_z=(0.2, 0.35),
+            # PickPlace: target is ON THE TABLE (cube resting center ~0.015 for the
+            # 3 cm cube), not airborne. VERIFY this z in sim/play. Was (0.2, 0.35).
+            pos_z=(0.015, 0.015),
             roll=(0.0, 0.0),
             pitch=(0.0, 0.0),
             yaw=(0.0, 0.0),
@@ -173,6 +175,40 @@ class RewardsCfg:
         weight=5.0,
     )
 
+    # --- place / release / at-rest (Increment 1 authorship) ---
+    # NOTE: weights below are STARTING POINTS to tune. The invariant: these place
+    # terms must DOMINATE the retained airborne terms above (object_goal_tracking
+    # 16, lifting_object 15) or the arm hovers the cube instead of setting it down.
+    place_on_table = RewTerm(
+        func=mdp.object_at_target_on_table,
+        params={"xy_std": 0.05, "z_std": 0.01, "command_name": "object_pose"},
+        weight=25.0,
+    )
+
+    released = RewTerm(
+        func=mdp.object_released,
+        params={
+            "command_name": "object_pose",
+            "lin_vel_thresh": 0.02,
+            "xy_std": 0.05,
+            "z_std": 0.01,
+            "gripper_open_thresh": 0.25,
+        },
+        weight=20.0,
+    )
+
+    at_rest = RewTerm(
+        func=mdp.object_at_rest,
+        params={
+            "lin_vel_thresh": 0.02,
+            "ang_vel_thresh": 0.5,
+            "command_name": "object_pose",
+            "xy_std": 0.05,
+            "z_std": 0.01,
+        },
+        weight=5.0,
+    )
+
     # action penalty
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
 
@@ -191,6 +227,20 @@ class TerminationsCfg:
 
     object_dropping = DoneTerm(
         func=mdp.root_height_below_minimum, params={"minimum_height": -0.05, "asset_cfg": SceneEntityCfg("object")}
+    )
+
+    # Success = cube placed at target, at rest, gripper open, EE withdrawn.
+    # Thresholds are STARTING POINTS to tune (see terminations.place_success).
+    place_success = DoneTerm(
+        func=mdp.place_success,
+        params={
+            "command_name": "object_pose",
+            "xy_threshold": 0.02,
+            "z_tol": 0.01,
+            "vel_thresh": 0.02,
+            "gripper_open_thresh": 0.25,
+            "ee_clearance": 0.05,
+        },
     )
 
 
