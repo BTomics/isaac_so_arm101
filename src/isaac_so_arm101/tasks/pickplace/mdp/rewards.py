@@ -16,9 +16,15 @@ import torch
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
-from isaaclab.utils.math import combine_frame_transforms, quat_error_magnitude, quat_mul
+from isaaclab.utils.math import combine_frame_transforms, quat_apply, quat_error_magnitude, quat_mul
 
 from .place import object_was_lifted
+
+# The ee_frame offset points from gripper_link to the fingertips, so (normalized)
+# it is the gripper's APPROACH direction in the gripper's local frame. A clean
+# top-down grasp has this pointing world-down. If the grasp gets *worse* with the
+# grasp_top_down reward on, this axis/sign is wrong — negate it.
+_GRIPPER_APPROACH_LOCAL = (0.01, 0.0, -0.09)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -298,3 +304,40 @@ def object_orientation_to_target(
 
     lifted = object_was_lifted(env, lift_height, object_cfg, update=False)
     return lifted * reward
+
+
+def grasp_top_down(
+    env: ManagerBasedRLEnv,
+    std: float,
+    near_std: float = 0.1,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reward the gripper approaching the cube top-down.
+
+    The base lift reward (``object_ee_distance``) only pulls the EE *point* to the
+    cube — it never constrains the arm's configuration, so with a redundant arm +
+    self-collisions the policy settles into a folded, sideways/under grasp. That
+    contorted hold can't set the cube down flat or release it (inherited straight
+    into the place task). This term rewards the gripper's approach axis (the
+    ee-frame offset direction, ~gripper-local −Z) pointing world-down, and weights
+    it by proximity to the cube so it shapes the actual grasp, not idle posture.
+    """
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    obj: RigidObject = env.scene[object_cfg.name]
+
+    quat = ee_frame.data.target_quat_w[..., 0, :]  # (N, 4) gripper world orientation
+    approach_local = torch.tensor(_GRIPPER_APPROACH_LOCAL, device=quat.device, dtype=quat.dtype)
+    approach_local = (approach_local / torch.norm(approach_local)).expand(quat.shape[0], 3)
+    approach_world = quat_apply(quat, approach_local)
+
+    # cos angle with world-down (0, 0, -1); = 1 when the gripper points straight down
+    cos_down = -approach_world[:, 2]
+    down_reward = 1.0 - torch.tanh((1.0 - cos_down) / std)
+
+    # only shape the grasp: weight by how close the EE already is to the cube
+    ee_pos = ee_frame.data.target_pos_w[..., 0, :]
+    dist = torch.norm(ee_pos - obj.data.root_pos_w[:, :3], dim=1)
+    near = 1.0 - torch.tanh(dist / near_std)
+
+    return near * down_reward
