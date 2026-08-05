@@ -310,18 +310,27 @@ def grasp_top_down(
     env: ManagerBasedRLEnv,
     std: float,
     near_std: float = 0.1,
+    min_height: float = 0.03,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
 ) -> torch.Tensor:
-    """Reward the gripper approaching the cube top-down.
+    """Reward holding the cube top-down *while it is lifted off the table*.
 
     The base lift reward (``object_ee_distance``) only pulls the EE *point* to the
     cube — it never constrains the arm's configuration, so with a redundant arm +
     self-collisions the policy settles into a folded, sideways/under grasp. That
     contorted hold can't set the cube down flat or release it (inherited straight
     into the place task). This term rewards the gripper's approach axis (the
-    ee-frame offset direction, ~gripper-local −Z) pointing world-down, and weights
-    it by proximity to the cube so it shapes the actual grasp, not idle posture.
+    ee-frame offset direction, ~gripper-local −Z) pointing world-down, weighted by
+    proximity to the cube.
+
+    Un-farmable gate: it only pays while the cube is actually OFF the table
+    (``root_z > min_height``). On the table it is exactly zero, so the policy
+    cannot park open-handed over a grounded cube farming posture (the observed
+    dead-end where ``lifting_object`` collapsed to 0). The only way to collect it
+    is to lift — and while lifting, ``lifting_object`` is already driving the cube
+    up — so this term shapes the *lift* to stay top-down instead of competing with
+    it.
     """
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
     obj: RigidObject = env.scene[object_cfg.name]
@@ -340,4 +349,7 @@ def grasp_top_down(
     dist = torch.norm(ee_pos - obj.data.root_pos_w[:, :3], dim=1)
     near = 1.0 - torch.tanh(dist / near_std)
 
-    return near * down_reward
+    # un-farmable: zero unless the cube is genuinely lifted off the table
+    lifted_now = (obj.data.root_pos_w[:, 2] > min_height).float()
+
+    return lifted_now * near * down_reward

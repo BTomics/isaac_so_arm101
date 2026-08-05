@@ -171,8 +171,8 @@ class RewardsCfg:
     # _GRIPPER_APPROACH_LOCAL's sign in rewards.py.
     grasp_top_down = RewTerm(
         func=mdp.grasp_top_down,
-        params={"std": 0.5, "near_std": 0.1},
-        weight=5.0,
+        params={"std": 0.5, "near_std": 0.1, "min_height": 0.025},
+        weight=3.0,
     )
 
     lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=15.0)
