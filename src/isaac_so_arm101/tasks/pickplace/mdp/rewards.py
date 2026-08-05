@@ -16,7 +16,7 @@ import torch
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
-from isaaclab.utils.math import combine_frame_transforms
+from isaaclab.utils.math import combine_frame_transforms, quat_error_magnitude, quat_mul
 
 from .place import object_was_lifted
 
@@ -262,3 +262,39 @@ def object_at_rest(
     )
     # Reward = AND of both (object_at_target already carries the anti-slide gate)
     return linear_vel_check * angular_vel_check * object_at_target
+
+
+def object_orientation_to_target(
+    env: ManagerBasedRLEnv,
+    std: float,
+    command_name: str,
+    lift_height: float = 0.06,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Reward the cube's orientation matching the commanded (upright) orientation.
+
+    Nothing else constrains *how* the cube ends up at the target, so the policy
+    can hit the target position with a tilted / under-the-cube grasp (seen as a
+    large ``Metrics/object_orientation_error``). A badly rotated, hand-held cube
+    is not resting flat, so opening the gripper drops it — which is why the
+    policy won't release. This term pushes a clean, upright placement so the set-
+    down is stable and releasing becomes safe.
+
+    Tanh-kernel on the quaternion angle between the cube and the commanded
+    orientation (command rotation is in the robot base frame → composed into
+    world). Use a generous ``std`` so it punishes large tilts, not small yaw.
+    Gated on the anti-slide latch (read-only) so an untouched upright cube at
+    spawn earns nothing.
+    """
+    robot: RigidObject = env.scene[robot_cfg.name]
+    object: RigidObject = env.scene[object_cfg.name]
+    command = env.command_manager.get_command(command_name)
+
+    # desired orientation in the world frame: robot_root_quat ⊗ command_quat
+    des_quat_w = quat_mul(robot.data.root_state_w[:, 3:7], command[:, 3:7])
+    orientation_error = quat_error_magnitude(object.data.root_quat_w, des_quat_w)
+    reward = 1.0 - torch.tanh(orientation_error / std)
+
+    lifted = object_was_lifted(env, lift_height, object_cfg, update=False)
+    return lifted * reward

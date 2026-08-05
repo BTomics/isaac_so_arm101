@@ -188,10 +188,21 @@ class RewardsCfg:
     # table continuously from several cm up, so the descent has a monotonic
     # gradient instead of a reward valley at the airborne-term z-gate (0.025).
     # This term also carries the cube toward the target XY (lifted × z × xy).
+    # place_on_table is now DELIBERATELY smaller than `released`: it pays whether
+    # the gripper is open or closed, so a high weight makes "hold the cube on the
+    # spot" as good as letting go. Keep it as descent shaping, let `released` win.
     place_on_table = RewTerm(
         func=mdp.object_at_target_on_table,
         params={"xy_std": 0.05, "z_std": 0.08, "command_name": "object_pose", "lift_height": 0.06},
-        weight=25.0,
+        weight=12.0,
+    )
+
+    # Reward a clean upright placement — attacks the tilted/under-the-cube grasp
+    # (high object_orientation_error) that leaves the cube unstable to release.
+    place_orientation = RewTerm(
+        func=mdp.object_orientation_to_target,
+        params={"std": 0.5, "command_name": "object_pose", "lift_height": 0.06},
+        weight=8.0,
     )
 
     released = RewTerm(
@@ -204,7 +215,7 @@ class RewardsCfg:
             "gripper_open_thresh": 0.25,
             "lift_height": 0.06,
         },
-        weight=20.0,
+        weight=30.0,
     )
 
     at_rest = RewTerm(
