@@ -311,12 +311,20 @@ class TerminationsCfg:
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
 
+    # Pushed out from 10000 (iteration ~417) to 60000 (~2500), i.e. past the end of
+    # a 1500-iteration run, so the penalties stay at their -1e-4 base throughout.
+    # Reason: these two are a smoothness polish, but they were firing BEFORE the
+    # grasp was ever discovered and then preventing it. reaching_object peaked at
+    # 0.85 (EE 7.6 mm from the cube centre) and fell to ~0.64 (19 mm) exactly at
+    # iteration ~420 when they jumped to -1e-1; a gripper 2 cm off a 3 cm cube
+    # cannot close on it, so lifting_object stayed at exactly 0.
+    # The pick must be learned first - re-tighten these only once it is reliable.
     action_rate = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 10000}
+        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 60000}
     )
 
     joint_vel = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
+        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 60000}
     )
 
     # No reward decays here on purpose. Every decay tried on this task fired before
