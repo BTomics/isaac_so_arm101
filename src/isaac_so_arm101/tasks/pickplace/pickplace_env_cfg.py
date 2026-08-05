@@ -164,48 +164,55 @@ class RewardsCfg:
 
     reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.05}, weight=1.0)
 
-    # Reward a top-down gripper approach (weighted by proximity to the cube). This
-    # is the ROOT fix for the contorted/sideways grasp — inherited from lift, where
-    # nothing constrains the arm's configuration — that stops the cube being set
-    # down flat or released. Watch object_orientation_error: if it goes UP, flip
-    # _GRIPPER_APPROACH_LOCAL's sign in rewards.py.
+    # Reward holding the cube top-down, weighted by proximity and gated on the cube
+    # actually being off the table (min_height) so it cannot be farmed by hovering
+    # open-handed over a grounded cube. Targets the contorted/sideways grasp
+    # inherited from lift, where nothing constrains the arm's configuration. The
+    # approach-axis sign in rewards.py is settled — do not re-derive it.
     grasp_top_down = RewTerm(
         func=mdp.grasp_top_down,
         params={"std": 0.5, "near_std": 0.1, "min_height": 0.025},
         weight=3.0,
     )
 
-    lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=15.0)
+    # BOOTSTRAP ONLY — decayed to 1.0 by the curriculum. At a high standing weight
+    # this term is a risk-free annuity for holding the cube in the air forever
+    # (the observed frozen-hold pose): descending costs it immediately, while the
+    # place terms only pay once the cube is down, still and released. Keep it just
+    # strong enough to discover the pick, then get it out of the way.
+    lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=5.0)
 
+    # Latch-gated (see mdp.object_goal_distance): pays continuously from pick all
+    # the way down to the cube resting on the target, so the descent is monotonic.
+    # NOT decayed — unlike the airborne version, this term no longer fights the
+    # place. lift_height must match every other place term.
     object_goal_tracking = RewTerm(
         func=mdp.object_goal_distance,
-        params={"std": 0.3, "minimal_height": 0.025, "command_name": "object_pose"},
+        params={"std": 0.3, "lift_height": 0.06, "command_name": "object_pose"},
         weight=16.0,
     )
 
     object_goal_tracking_fine_grained = RewTerm(
         func=mdp.object_goal_distance,
-        params={"std": 0.05, "minimal_height": 0.025, "command_name": "object_pose"},
+        params={"std": 0.05, "lift_height": 0.06, "command_name": "object_pose"},
         weight=5.0,
     )
 
     # --- place / release / at-rest (Increment 1 authorship) ---
-    # NOTE: weights below are STARTING POINTS to tune. The invariant: these place
-    # terms must DOMINATE the retained airborne terms above (object_goal_tracking
-    # 16, lifting_object 15) or the arm hovers the cube instead of setting it down.
-    # `lift_height` (the anti-slide gate: cube must clear this height to unlock any
-    # place reward) must be the SAME across all place terms + the success terms.
-    # z_std deliberately WIDE (0.08): rewards the cube getting lower toward the
-    # table continuously from several cm up, so the descent has a monotonic
-    # gradient instead of a reward valley at the airborne-term z-gate (0.025).
-    # This term also carries the cube toward the target XY (lifted × z × xy).
-    # place_on_table is now DELIBERATELY smaller than `released`: it pays whether
-    # the gripper is open or closed, so a high weight makes "hold the cube on the
-    # spot" as good as letting go. Keep it as descent shaping, let `released` win.
+    # NOTE: weights below are STARTING POINTS to tune. `lift_height` (the anti-slide
+    # gate: cube must clear this height to unlock any place reward) must be the SAME
+    # across all place terms + the success terms.
+    # Now that object_goal_tracking is latch-gated it already provides the dense
+    # pull all the way down to the target, so this term largely duplicates it —
+    # hence 12 -> 6, to avoid double-counting descent. It stays as the term that
+    # specifically shapes "at table height" (wide z_std 0.08) rather than just
+    # "near the goal point". It is DELIBERATELY smaller than `released`: it pays
+    # whether the gripper is open or closed, so a high weight would make "hold the
+    # cube on the spot" as good as letting go.
     place_on_table = RewTerm(
         func=mdp.object_at_target_on_table,
         params={"xy_std": 0.05, "z_std": 0.08, "command_name": "object_pose", "lift_height": 0.06},
-        weight=12.0,
+        weight=6.0,
     )
 
     # Reward a clean upright placement — attacks the tilted/under-the-cube grasp
@@ -310,19 +317,18 @@ class CurriculumCfg:
         func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
     )
 
-    # Switch OFF the airborne hover-over-target reward once the pick is learned,
-    # so the policy is forced to lower the cube onto the table for place reward
-    # instead of parking it in the air. lifting_object is kept (it bootstraps the
-    # pick). num_steps is the key knob: too early and the pick isn't learned yet;
-    # too late and it wastes iterations hovering. Tune from the run.
-    decay_goal_tracking = CurrTerm(
+    # Fade the lift bootstrap once the pick is learned. Holding the cube aloft is
+    # otherwise a risk-free standing reward that beats placing (descending forfeits
+    # it before the place terms pay out), which is exactly the frozen-hold pose the
+    # policy converged to. Decayed rather than removed so the pick stays supported.
+    # num_steps is the key knob: too early and the pick isn't learned yet; too late
+    # and it wastes iterations holding. Tune from the run.
+    # The goal-tracking decay terms are GONE on purpose: now that tracking is
+    # latch-gated it pays through the descent instead of fighting it, so there is
+    # nothing left to switch off.
+    decay_lifting = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "object_goal_tracking", "weight": 0.0, "num_steps": 12000},
-    )
-
-    decay_goal_tracking_fine = CurrTerm(
-        func=mdp.modify_reward_weight,
-        params={"term_name": "object_goal_tracking_fine_grained", "weight": 0.0, "num_steps": 12000},
+        params={"term_name": "lifting_object", "weight": 1.0, "num_steps": 12000},
     )
 
 

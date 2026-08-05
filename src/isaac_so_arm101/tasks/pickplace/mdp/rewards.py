@@ -63,12 +63,28 @@ def object_ee_distance(
 def object_goal_distance(
     env: ManagerBasedRLEnv,
     std: float,
-    minimal_height: float,
+    lift_height: float,
     command_name: str,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
-    """Reward the agent for tracking the goal pose using tanh-kernel."""
+    """Reward tracking the cube to the goal pose (tanh-kernel), gated on the
+    was-lifted LATCH rather than the cube's current height.
+
+    Diverges deliberately from the lift-task original, which gated on
+    ``object_z > minimal_height`` — i.e. it only paid while the cube was
+    AIRBORNE. That is a lift assumption, and it is the root cause of the traps
+    this task kept hitting: the term fights the descent (the cube must come down
+    to be placed, which switches the reward off), so it had to be curriculum-
+    decayed to zero, which in turn deleted the only pull toward the target and
+    promoted ``lifting_object`` into a risk-free hold-forever annuity.
+
+    Gating on the latch instead means: once the cube has been genuinely picked
+    this episode, tracking pays CONTINUOUSLY — lift, transport, descent, and
+    placed-on-the-table — because the goal itself is on the table. That makes the
+    whole trajectory monotonic (hovering scores strictly worse than descending)
+    and needs no curriculum decay.
+    """
     # extract the used quantities (to enable type-hinting)
     robot: RigidObject = env.scene[robot_cfg.name]
     object: RigidObject = env.scene[object_cfg.name]
@@ -78,8 +94,9 @@ def object_goal_distance(
     des_pos_w, _ = combine_frame_transforms(robot.data.root_state_w[:, :3], robot.data.root_state_w[:, 3:7], des_pos_b)
     # distance of the end-effector to the object: (num_envs,)
     distance = torch.norm(des_pos_w - object.data.root_pos_w[:, :3], dim=1)
-    # rewarded if the object is lifted above the threshold
-    return (object.data.root_pos_w[:, 2] > minimal_height) * (1 - torch.tanh(distance / std))
+    # anti-slide gate: only credit tracking once the cube was genuinely picked
+    lifted = object_was_lifted(env, lift_height, object_cfg, update=True)
+    return lifted * (1 - torch.tanh(distance / std))
 
 
 def object_ee_distance_and_lifted(
