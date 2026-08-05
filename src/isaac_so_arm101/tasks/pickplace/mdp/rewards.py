@@ -18,6 +18,8 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
 from isaaclab.utils.math import combine_frame_transforms
 
+from .place import object_was_lifted
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -102,6 +104,7 @@ def object_at_target_on_table(
     xy_std: float,
     z_std: float,
     command_name: str,
+    lift_height: float = 0.06,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
@@ -143,8 +146,15 @@ def object_at_target_on_table(
     # Z reward: the cube is at table height
     distance_z = torch.abs(object.data.root_pos_w[:, 2] - des_pos_w[:, 2])
     z_reward = 1.0 - torch.tanh(distance_z / z_std)
-    
-    return z_reward * xy_reward
+
+    # Anti-slide gate: only credit a placement if the cube was genuinely PICKED
+    # (lifted clear of the table) at some point this episode. Pure sliding never
+    # sets the latch, so it earns nothing here. This term runs every step, so it
+    # is the latch's updater (update=True); object_released / object_at_rest
+    # inherit the gate by calling this function; place_complete reads it.
+    lifted = object_was_lifted(env, lift_height, object_cfg, update=True)
+
+    return lifted * z_reward * xy_reward
 
 
 def object_released(
@@ -154,6 +164,7 @@ def object_released(
     xy_std: float,
     z_std: float,
     gripper_open_thresh: float,
+    lift_height: float = 0.06,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["gripper"]),
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
@@ -188,12 +199,13 @@ def object_released(
     gripper_pos = robot.data.joint_pos[:, gripper_idx]
     gripper_open = (gripper_pos > gripper_open_thresh).float()
     
-    # At target
+    # At target (inherits the anti-slide latch gate)
     at_target = object_at_target_on_table(
         env=env,
         xy_std=xy_std,
         z_std=z_std,
         command_name=command_name,
+        lift_height=lift_height,
         robot_cfg=robot_cfg,
         object_cfg=object_cfg,
     )
@@ -212,6 +224,7 @@ def object_at_rest(
     command_name: str,
     xy_std: float,
     z_std: float,
+    lift_height: float = 0.06,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
@@ -243,8 +256,9 @@ def object_at_rest(
         xy_std=xy_std,
         z_std=z_std,
         command_name=command_name,
+        lift_height=lift_height,
         robot_cfg=robot_cfg,
         object_cfg=object_cfg,
     )
-    # Reward = AND of both
+    # Reward = AND of both (object_at_target already carries the anti-slide gate)
     return linear_vel_check * angular_vel_check * object_at_target

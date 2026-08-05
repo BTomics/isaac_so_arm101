@@ -154,6 +154,9 @@ class EventCfg:
         },
     )
 
+    # Clear the anti-slide "was-lifted" latch at the start of every episode.
+    reset_lifted_latch = EventTerm(func=mdp.reset_lifted_latch, mode="reset")
+
 
 @configclass
 class RewardsCfg:
@@ -179,9 +182,11 @@ class RewardsCfg:
     # NOTE: weights below are STARTING POINTS to tune. The invariant: these place
     # terms must DOMINATE the retained airborne terms above (object_goal_tracking
     # 16, lifting_object 15) or the arm hovers the cube instead of setting it down.
+    # `lift_height` (the anti-slide gate: cube must clear this height to unlock any
+    # place reward) must be the SAME across all place terms + the success terms.
     place_on_table = RewTerm(
         func=mdp.object_at_target_on_table,
-        params={"xy_std": 0.05, "z_std": 0.01, "command_name": "object_pose"},
+        params={"xy_std": 0.05, "z_std": 0.01, "command_name": "object_pose", "lift_height": 0.06},
         weight=25.0,
     )
 
@@ -193,6 +198,7 @@ class RewardsCfg:
             "xy_std": 0.05,
             "z_std": 0.01,
             "gripper_open_thresh": 0.25,
+            "lift_height": 0.06,
         },
         weight=20.0,
     )
@@ -205,8 +211,28 @@ class RewardsCfg:
             "command_name": "object_pose",
             "xy_std": 0.05,
             "z_std": 0.01,
+            "lift_height": 0.06,
         },
         weight=5.0,
+    )
+
+    # One-time bonus when the place is genuinely complete (same condition as the
+    # place_success termination). Must OUT-VALUE the dense place reward the agent
+    # gives up by ending the episode early, or it avoids success to keep farming.
+    # TUNE upward if success-rate stays low while time_out stays ~1.
+    place_success_bonus = RewTerm(
+        func=mdp.place_success_bonus,
+        params={
+            "command_name": "object_pose",
+            "xy_threshold": 0.02,
+            "z_tol": 0.01,
+            "lin_vel_thresh": 0.02,
+            "ang_vel_thresh": 0.05,
+            "gripper_open_thresh": 0.25,
+            "ee_clearance": 0.05,
+            "lift_height": 0.06,
+        },
+        weight=50.0,
     )
 
     # action penalty
@@ -237,9 +263,11 @@ class TerminationsCfg:
             "command_name": "object_pose",
             "xy_threshold": 0.02,
             "z_tol": 0.01,
-            "vel_thresh": 0.02,
+            "lin_vel_thresh": 0.02,
+            "ang_vel_thresh": 0.05,
             "gripper_open_thresh": 0.25,
             "ee_clearance": 0.05,
+            "lift_height": 0.06,
         },
     )
 
