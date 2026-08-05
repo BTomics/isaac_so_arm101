@@ -184,9 +184,13 @@ class RewardsCfg:
     # 16, lifting_object 15) or the arm hovers the cube instead of setting it down.
     # `lift_height` (the anti-slide gate: cube must clear this height to unlock any
     # place reward) must be the SAME across all place terms + the success terms.
+    # z_std deliberately WIDE (0.08): rewards the cube getting lower toward the
+    # table continuously from several cm up, so the descent has a monotonic
+    # gradient instead of a reward valley at the airborne-term z-gate (0.025).
+    # This term also carries the cube toward the target XY (lifted × z × xy).
     place_on_table = RewTerm(
         func=mdp.object_at_target_on_table,
-        params={"xy_std": 0.05, "z_std": 0.01, "command_name": "object_pose", "lift_height": 0.06},
+        params={"xy_std": 0.05, "z_std": 0.08, "command_name": "object_pose", "lift_height": 0.06},
         weight=25.0,
     )
 
@@ -282,6 +286,21 @@ class CurriculumCfg:
 
     joint_vel = CurrTerm(
         func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
+    )
+
+    # Switch OFF the airborne hover-over-target reward once the pick is learned,
+    # so the policy is forced to lower the cube onto the table for place reward
+    # instead of parking it in the air. lifting_object is kept (it bootstraps the
+    # pick). num_steps is the key knob: too early and the pick isn't learned yet;
+    # too late and it wastes iterations hovering. Tune from the run.
+    decay_goal_tracking = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "object_goal_tracking", "weight": 0.0, "num_steps": 12000},
+    )
+
+    decay_goal_tracking_fine = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "object_goal_tracking_fine_grained", "weight": 0.0, "num_steps": 12000},
     )
 
 
