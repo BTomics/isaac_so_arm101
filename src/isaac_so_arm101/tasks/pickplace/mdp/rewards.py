@@ -20,11 +20,13 @@ from isaaclab.utils.math import combine_frame_transforms, quat_apply, quat_error
 
 from .place import object_was_lifted
 
-# The ee_frame offset points from gripper_link to the fingertips, so (normalized)
-# it is the gripper's APPROACH direction in the gripper's local frame. A clean
-# top-down grasp has this pointing world-down. If the grasp gets *worse* with the
-# grasp_top_down reward on, this axis/sign is wrong — negate it.
-_GRIPPER_APPROACH_LOCAL = (0.01, 0.0, -0.09)
+# The gripper's APPROACH direction in the gripper's local frame (normalized), i.e.
+# the axis that must point world-down for a clean top-down grasp. This is the
+# ee_frame offset (gripper_link -> fingertips) NEGATED: with the raw offset sign
+# the policy converged to holding the cube overhead, gripper pointing up, so the
+# frame's local axis runs opposite to the offset. Sign verified in sim, do not
+# re-derive it from the offset.
+_GRIPPER_APPROACH_LOCAL = (-0.01, 0.0, 0.09)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
