@@ -99,7 +99,7 @@ class CommandsCfg:
             pos_y=(-0.3, -0.1),
             # PickPlace: target is ON THE TABLE (cube resting center ~0.015 for the
             # 3 cm cube), not airborne. VERIFY this z in sim/play. Was (0.2, 0.35).
-            pos_z=(0.015, 0.015),
+            pos_z=(0.015, 0.020),
             roll=(0.0, 0.0),
             pitch=(0.0, 0.0),
             yaw=(0.0, 0.0),
