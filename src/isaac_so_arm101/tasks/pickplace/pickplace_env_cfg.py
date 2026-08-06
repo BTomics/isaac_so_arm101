@@ -102,14 +102,25 @@ class CommandsCfg:
         # ANY height: roughly a third of commanded goals were impossible, which is
         # why the goal reads as a weak knob that the policy learned to ignore.
         #
-        # This box sits in front of the arm where the cube actually is, and is
-        # >=93% reachable across its whole z range. Lowered from z(0.2,0.35)
-        # toward the table, but deliberately NOT to table height: object_goal_
-        # distance still gates on `object_z > minimal_height`, so a goal at
-        # 0.015 would switch the reward off exactly when the cube arrives. 0.06
-        # is the lowest goal that stays clear of that gate.
+        # This box sits in front of the arm where the cube actually is. Lowered
+        # from z(0.2,0.35) toward the table, but deliberately NOT to table
+        # height: object_goal_distance still gates on `object_z > minimal_height`,
+        # so a goal at 0.015 would switch the reward off exactly when the cube
+        # arrives. 0.06 is the lowest goal that stays clear of that gate.
+        #
+        # x starts at 0.15, not 0.10. Goals close to the base are reachable but
+        # CRAMPED, and raw reachability hides it: sampling arm poses that land in
+        # each x band, x[0.10,0.12) has only 1.95% of configurations versus 6.20%
+        # at x[0.24,0.26), and needs mean |shoulder_lift| 1.06 rad against 0.61.
+        # Few available configurations is what forces the folded, contorted pose —
+        # the geometry picks it, not the policy. Moving the floor to 0.15 also
+        # takes whole-box reachability from 92.4% to 99.6%.
+        #
+        # This reduces the pressure toward contortion but does not remove it:
+        # nothing in this reward set constrains posture. That is grasp_top_down's
+        # job (axis now corrected), in Increment 1.
         ranges=mdp.UniformPoseCommandCfg.Ranges(
-            pos_x=(0.10, 0.30),
+            pos_x=(0.15, 0.30),
             pos_y=(-0.20, 0.20),
             pos_z=(0.06, 0.20),
             roll=(0.0, 0.0),
