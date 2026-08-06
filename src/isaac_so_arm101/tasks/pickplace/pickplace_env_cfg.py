@@ -94,12 +94,24 @@ class CommandsCfg:
         body_name=MISSING,  # will be set by agent env cfg
         resampling_time_range=(5.0, 5.0),
         debug_vis=True,
+        # Goal box, in the ROBOT BASE frame (SO-101: +x forward).
+        #
+        # The inherited box x[-0.1,0.1] y[-0.3,-0.1] was the SO-100 convention
+        # (-y forward) and was never re-derived for this arm. Sampling the SO-101
+        # fingertip workspace off the URDF puts it at only ~68-72% reachable at
+        # ANY height: roughly a third of commanded goals were impossible, which is
+        # why the goal reads as a weak knob that the policy learned to ignore.
+        #
+        # This box sits in front of the arm where the cube actually is, and is
+        # >=93% reachable across its whole z range. Lowered from z(0.2,0.35)
+        # toward the table, but deliberately NOT to table height: object_goal_
+        # distance still gates on `object_z > minimal_height`, so a goal at
+        # 0.015 would switch the reward off exactly when the cube arrives. 0.06
+        # is the lowest goal that stays clear of that gate.
         ranges=mdp.UniformPoseCommandCfg.Ranges(
-            pos_x=(-0.1, 0.1),
-            pos_y=(-0.3, -0.1),
-            # PickPlace: target is ON THE TABLE (cube resting center ~0.015 for the
-            # 3 cm cube), not airborne. VERIFY this z in sim/play. Was (0.2, 0.35).
-            pos_z=(0.015, 0.020),
+            pos_x=(0.10, 0.30),
+            pos_y=(-0.20, 0.20),
+            pos_z=(0.06, 0.20),
             roll=(0.0, 0.0),
             pitch=(0.0, 0.0),
             yaw=(0.0, 0.0),
@@ -144,130 +156,60 @@ class EventCfg:
 
     reset_all = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
 
+    # NOTE for Increment 1: `reset_lifted_latch` was removed with the place terms.
+    # Any term that gates on the was-lifted latch MUST come back together with
+    # `reset_lifted_latch = EventTerm(func=mdp.reset_lifted_latch, mode="reset")`,
+    # or the latch never clears and every episode after the first starts "lifted".
+
+    # Spawn box, as an offset from the object's init pos [0.2, 0.0, 0.015], so
+    # x in [0.10, 0.30], y in [-0.25, 0.25] in the robot base frame.
+    #
+    # y widened from +-0.20. Sampling the SO-101 fingertip workspace off the URDF
+    # (top-down capable, fingertips at the cube's centre height) gives a y reach of
+    # +-0.267 at x=0.30 and +-0.35 nearer the base, so every corner of this box is
+    # inside the envelope with >=1.7 cm of margin.
+    #
+    # x is left alone on purpose: the envelope narrows fast with distance, so
+    # pushing the far edge past 0.30 puts the far CORNERS out of reach even though
+    # the far centre is fine. Widening x means shaping the region (or sampling in
+    # polar coords), not stretching the rectangle.
     reset_object_position = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.1, 0.1), "y": (-0.2, 0.2), "z": (0.0, 0.0)},
+            "pose_range": {"x": (-0.1, 0.1), "y": (-0.25, 0.25), "z": (0.0, 0.0)},
             "velocity_range": {},
             "asset_cfg": SceneEntityCfg("object", body_names="Object"),
         },
     )
 
-    # Clear the anti-slide "was-lifted" latch at the start of every episode.
-    reset_lifted_latch = EventTerm(func=mdp.reset_lifted_latch, mode="reset")
-
 
 @configclass
 class RewardsCfg:
-    """Reward terms for the MDP."""
+    """Reward terms for the MDP.
+
+    STEP 0 RESET: this is the lift task's reward set, verbatim and unweighted-
+    changed. Eleven runs of place-reward surgery on top of it never produced a
+    pick, so the place terms are unwired (the functions stay in ``mdp/`` for
+    Increment 1) and the only variables moved are the spawn and goal boxes.
+
+    Do not add a term back without a run that shows the pick surviving first.
+    """
 
     reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.05}, weight=1.0)
 
-    # Reward holding the cube top-down, weighted by proximity and gated on the cube
-    # actually being off the table (min_height) so it cannot be farmed by hovering
-    # open-handed over a grounded cube. Targets the contorted/sideways grasp
-    # inherited from lift, where nothing constrains the arm's configuration. The
-    # approach-axis sign in rewards.py is settled — do not re-derive it.
-    grasp_top_down = RewTerm(
-        func=mdp.grasp_top_down,
-        params={"std": 0.5, "near_std": 0.1, "min_height": 0.025},
-        weight=3.0,
-    )
-
-    # Weight 15 and NOT decayed. Cutting this to 5 (+decay to 1) killed the pick
-    # outright — lifting_object never left 1e-7 and nothing downstream ever fired,
-    # while runs that lifted reliably all had 15 under identical action penalties.
-    # The frozen-hold this was meant to fix was a PATH problem (the gradient pointed
-    # backward mid-descent), and latch-gating object_goal_tracking already fixes it:
-    # holding aloft pays ~30, placed pays ~70, and the path between is monotonic.
-    # Suppressing the lift signal was never part of that fix.
     lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=15.0)
 
-    # Latch-gated (see mdp.object_goal_distance): pays continuously from pick all
-    # the way down to the cube resting on the target, so the descent is monotonic.
-    # NOT decayed — unlike the airborne version, this term no longer fights the
-    # place. lift_height must match every other place term.
     object_goal_tracking = RewTerm(
         func=mdp.object_goal_distance,
-        params={"std": 0.3, "lift_height": 0.06, "command_name": "object_pose"},
+        params={"std": 0.3, "minimal_height": 0.025, "command_name": "object_pose"},
         weight=16.0,
     )
 
     object_goal_tracking_fine_grained = RewTerm(
         func=mdp.object_goal_distance,
-        params={"std": 0.05, "lift_height": 0.06, "command_name": "object_pose"},
+        params={"std": 0.05, "minimal_height": 0.025, "command_name": "object_pose"},
         weight=5.0,
-    )
-
-    # --- place / release / at-rest (Increment 1 authorship) ---
-    # NOTE: weights below are STARTING POINTS to tune. `lift_height` (the anti-slide
-    # gate: cube must clear this height to unlock any place reward) must be the SAME
-    # across all place terms + the success terms.
-    # Now that object_goal_tracking is latch-gated it already provides the dense
-    # pull all the way down to the target, so this term largely duplicates it —
-    # hence 12 -> 6, to avoid double-counting descent. It stays as the term that
-    # specifically shapes "at table height" (wide z_std 0.08) rather than just
-    # "near the goal point". It is DELIBERATELY smaller than `released`: it pays
-    # whether the gripper is open or closed, so a high weight would make "hold the
-    # cube on the spot" as good as letting go.
-    place_on_table = RewTerm(
-        func=mdp.object_at_target_on_table,
-        params={"xy_std": 0.05, "z_std": 0.08, "command_name": "object_pose", "lift_height": 0.06},
-        weight=6.0,
-    )
-
-    # Reward a clean upright placement — attacks the tilted/under-the-cube grasp
-    # (high object_orientation_error) that leaves the cube unstable to release.
-    place_orientation = RewTerm(
-        func=mdp.object_orientation_to_target,
-        params={"std": 0.5, "command_name": "object_pose", "lift_height": 0.06},
-        weight=8.0,
-    )
-
-    released = RewTerm(
-        func=mdp.object_released,
-        params={
-            "command_name": "object_pose",
-            "lin_vel_thresh": 0.02,
-            "xy_std": 0.05,
-            "z_std": 0.01,
-            "gripper_open_thresh": 0.25,
-            "lift_height": 0.06,
-        },
-        weight=30.0,
-    )
-
-    at_rest = RewTerm(
-        func=mdp.object_at_rest,
-        params={
-            "lin_vel_thresh": 0.02,
-            "ang_vel_thresh": 0.5,
-            "command_name": "object_pose",
-            "xy_std": 0.05,
-            "z_std": 0.01,
-            "lift_height": 0.06,
-        },
-        weight=5.0,
-    )
-
-    # One-time bonus when the place is genuinely complete (same condition as the
-    # place_success termination). Must OUT-VALUE the dense place reward the agent
-    # gives up by ending the episode early, or it avoids success to keep farming.
-    # TUNE upward if success-rate stays low while time_out stays ~1.
-    place_success_bonus = RewTerm(
-        func=mdp.place_success_bonus,
-        params={
-            "command_name": "object_pose",
-            "xy_threshold": 0.02,
-            "z_tol": 0.01,
-            "lin_vel_thresh": 0.02,
-            "ang_vel_thresh": 0.05,
-            "gripper_open_thresh": 0.25,
-            "ee_clearance": 0.05,
-            "lift_height": 0.06,
-        },
-        weight=50.0,
     )
 
     # action penalty
@@ -290,41 +232,30 @@ class TerminationsCfg:
         func=mdp.root_height_below_minimum, params={"minimum_height": -0.05, "asset_cfg": SceneEntityCfg("object")}
     )
 
-    # Success = cube placed at target, at rest, gripper open, EE withdrawn.
-    # Thresholds are STARTING POINTS to tune (see terminations.place_success).
-    place_success = DoneTerm(
-        func=mdp.place_success,
-        params={
-            "command_name": "object_pose",
-            "xy_threshold": 0.02,
-            "z_tol": 0.01,
-            "lin_vel_thresh": 0.02,
-            "ang_vel_thresh": 0.05,
-            "gripper_open_thresh": 0.25,
-            "ee_clearance": 0.05,
-            "lift_height": 0.06,
-        },
-    )
+    # place_success is unwired for the step-0 reset — there is no place to succeed
+    # at while the goal is airborne. mdp.place_success is unchanged, ready for
+    # Increment 1.
 
 
 @configclass
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
 
-    # Pushed out from 10000 (iteration ~417) to 60000 (~2500), i.e. past the end of
-    # a 1500-iteration run, so the penalties stay at their -1e-4 base throughout.
-    # Reason: these two are a smoothness polish, but they were firing BEFORE the
-    # grasp was ever discovered and then preventing it. reaching_object peaked at
-    # 0.85 (EE 7.6 mm from the cube centre) and fell to ~0.64 (19 mm) exactly at
-    # iteration ~420 when they jumped to -1e-1; a gripper 2 cm off a 3 cm cube
-    # cannot close on it, so lifting_object stayed at exactly 0.
-    # The pick must be learned first - re-tighten these only once it is reliable.
+    # Back to the lift baseline's 10000 for the step-0 reset. That value is what
+    # the working lift policy was trained under, so keeping it means the boxes are
+    # the only variable in this run.
+    #
+    # Pre-registered prediction, since this fires at iteration ~417: if
+    # reaching_object climbs and then falls back around there, these are the cause
+    # (that is exactly what happened in run 10) and the wider boxes have made the
+    # pick harder to find before the penalties land. Push num_steps to 60000 and
+    # rerun — that is a clean single-variable follow-up, not a thing to pre-empt.
     action_rate = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 60000}
+        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 10000}
     )
 
     joint_vel = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 60000}
+        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
     )
 
     # No reward decays here on purpose. Every decay tried on this task fired before
@@ -332,8 +263,6 @@ class CurriculumCfg:
     #   - decaying object_goal_tracking to 0 removed the only pull toward the target
     #     and turned lifting_object into a hold-forever annuity (the frozen pose);
     #   - decaying lifting_object to 1 at iteration ~460 destroyed the pick entirely.
-    # Latch-gated tracking makes the whole trajectory monotonic, so nothing needs
-    # switching off to force the place.
     #
     # WATCH THE UNITS if a decay is ever reintroduced: modify_reward_weight's
     # num_steps counts ENVIRONMENT steps, ~24 per training iteration. num_steps=12000
@@ -349,10 +278,21 @@ class CurriculumCfg:
 class PickPlaceEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the pick-and-place environment.
 
-    Cloned verbatim from the lift task (SO-ARM101-Lift-Cube-v0) as the starting
-    baseline for SO-ARM101-PickPlace-v0. Trains identically to lift until the
-    place-specific rewards/terminations are added here + in ``mdp/``.
-    See ``SOARMRL/docs/pickplace_contract.md`` for the intended diff.
+    STEP 0 RESET. This is the lift task's MDP — same rewards, same weights, same
+    terminations, same penalty curriculum — with exactly two things changed:
+
+      * the spawn box is wider in y (+-0.25 from +-0.20);
+      * the goal box moved in front of the arm and down (x[0.10,0.30],
+        y[-0.20,0.20], z[0.06,0.20], from x[-0.1,0.1] y[-0.3,-0.1] z[0.2,0.35]).
+
+    Both boxes were sized against the SO-101 fingertip workspace sampled off the
+    URDF, not guessed. The old goal box was ~68-72% reachable on this arm — it was
+    the SO-100 (-y forward) convention, inherited through the clone and never
+    re-derived.
+
+    The place rewards and the success termination are written and unwired; see
+    ``RewardsCfg`` and ``SOARMRL/docs/pickplace_contract.md``. Re-wire them only
+    after a run shows the pick surviving the wider boxes.
     """
 
     # Scene settings

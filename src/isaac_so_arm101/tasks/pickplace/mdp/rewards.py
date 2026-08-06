@@ -20,13 +20,24 @@ from isaaclab.utils.math import combine_frame_transforms, quat_apply, quat_error
 
 from .place import object_was_lifted
 
-# The gripper's APPROACH direction in the gripper's local frame (normalized), i.e.
-# the axis that must point world-down for a clean top-down grasp. This is the
-# ee_frame offset (gripper_link -> fingertips) NEGATED: with the raw offset sign
-# the policy converged to holding the cube overhead, gripper pointing up, so the
-# frame's local axis runs opposite to the offset. Sign verified in sim, do not
-# re-derive it from the offset.
-_GRIPPER_APPROACH_LOCAL = (-0.01, 0.0, 0.09)
+# The gripper's APPROACH direction in the gripper's local frame (normalized): the
+# axis that must point world-down for a clean top-down grasp. This IS the ee_frame
+# offset (gripper_link -> fingertips) direction, not its negation.
+#
+# It was negated once, on the reading that the policy holding the cube overhead
+# gripper-up meant the axis ran opposite to the offset. That was backwards, and
+# measuring the URDF settles it (6M poses sampled inside the soft joint limits,
+# fingertip = gripper_link + this offset):
+#
+#   sign      cos_down at the arm's own home pose     max cos_down at cube height
+#   raw       +0.994                                  +1.000  (49% of poses > 0.7)
+#   negated   -0.994                                   +0.427 (0% of poses > 0.7)
+#
+# With the negated sign a top-down grasp at table height is not merely unlearned,
+# it is geometrically unreachable — the term peaks (0.999) only at z 0.18-0.25 with
+# the gripper inverted, i.e. it PAYS for holding the cube overhead. The behaviour
+# the flip was meant to fix is the behaviour the flip caused.
+_GRIPPER_APPROACH_LOCAL = (0.01, 0.0, -0.09)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -63,27 +74,51 @@ def object_ee_distance(
 def object_goal_distance(
     env: ManagerBasedRLEnv,
     std: float,
+    minimal_height: float,
+    command_name: str,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Reward tracking the cube to the goal pose (tanh-kernel) while it is lifted.
+
+    The lift-task original, restored for the step-0 reset. The height gate is
+    correct as long as the goal is AIRBORNE: the cube has to be off the table to
+    be at the goal, so the gate never fights the trajectory.
+
+    It becomes wrong the moment the goal moves to table height — then the cube
+    must come down to be placed, which switches the reward off mid-descent. That
+    is what :func:`object_goal_distance_latched` is for; swap to it in the same
+    change that lowers the goal onto the table, not before.
+    """
+    # extract the used quantities (to enable type-hinting)
+    robot: RigidObject = env.scene[robot_cfg.name]
+    object: RigidObject = env.scene[object_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    # compute the desired position in the world frame
+    des_pos_b = command[:, :3]
+    des_pos_w, _ = combine_frame_transforms(robot.data.root_state_w[:, :3], robot.data.root_state_w[:, 3:7], des_pos_b)
+    # distance of the end-effector to the object: (num_envs,)
+    distance = torch.norm(des_pos_w - object.data.root_pos_w[:, :3], dim=1)
+    return (object.data.root_pos_w[:, 2] > minimal_height) * (1 - torch.tanh(distance / std))
+
+
+def object_goal_distance_latched(
+    env: ManagerBasedRLEnv,
+    std: float,
     lift_height: float,
     command_name: str,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
-    """Reward tracking the cube to the goal pose (tanh-kernel), gated on the
-    was-lifted LATCH rather than the cube's current height.
+    """Goal tracking gated on the was-lifted LATCH rather than current height.
 
-    Diverges deliberately from the lift-task original, which gated on
-    ``object_z > minimal_height`` — i.e. it only paid while the cube was
-    AIRBORNE. That is a lift assumption, and it is the root cause of the traps
-    this task kept hitting: the term fights the descent (the cube must come down
-    to be placed, which switches the reward off), so it had to be curriculum-
-    decayed to zero, which in turn deleted the only pull toward the target and
-    promoted ``lifting_object`` into a risk-free hold-forever annuity.
+    For Increment 1, when the goal sits on the table. Once the cube has been
+    genuinely picked this episode, tracking pays CONTINUOUSLY — lift, transport,
+    descent, placed — so the trajectory is monotonic (hovering scores strictly
+    worse than descending) and needs no curriculum decay.
 
-    Gating on the latch instead means: once the cube has been genuinely picked
-    this episode, tracking pays CONTINUOUSLY — lift, transport, descent, and
-    placed-on-the-table — because the goal itself is on the table. That makes the
-    whole trajectory monotonic (hovering scores strictly worse than descending)
-    and needs no curriculum decay.
+    NOT wired in the step-0 reset: it has never been validated, because no run
+    since it was written has lifted the cube at all.
     """
     # extract the used quantities (to enable type-hinting)
     robot: RigidObject = env.scene[robot_cfg.name]
