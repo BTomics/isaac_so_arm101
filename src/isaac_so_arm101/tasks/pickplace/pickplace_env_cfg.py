@@ -89,11 +89,16 @@ class ObjectTableSceneCfg(InteractiveSceneCfg):
 class CommandsCfg:
     """Command terms for the MDP."""
 
-    object_pose = mdp.UniformPoseCommandCfg(
+    object_pose = mdp.ObjectAwarePoseCommandCfg(
         asset_name="robot",
         body_name=MISSING,  # will be set by agent env cfg
         resampling_time_range=(5.0, 5.0),
         debug_vis=True,
+        # The goal is on the table now, in the same plane the cube spawns in, so a
+        # plain uniform draw can land it on top of the cube. The latch keeps that
+        # un-farmable but it makes those episodes trivial (pick up, put down). Draw
+        # again until the goal is 12 cm away in XY, so every episode is a transport.
+        min_separation=0.12,
         # Goal box, in the ROBOT BASE frame (SO-101: +x forward).
         #
         # The inherited box x[-0.1,0.1] y[-0.3,-0.1] was the SO-100 convention
@@ -102,11 +107,10 @@ class CommandsCfg:
         # ANY height: roughly a third of commanded goals were impossible, which is
         # why the goal reads as a weak knob that the policy learned to ignore.
         #
-        # This box sits in front of the arm where the cube actually is. Lowered
-        # from z(0.2,0.35) toward the table, but deliberately NOT to table
-        # height: object_goal_distance still gates on `object_z > minimal_height`,
-        # so a goal at 0.015 would switch the reward off exactly when the cube
-        # arrives. 0.06 is the lowest goal that stays clear of that gate.
+        # z is the cube's resting centre height: the goal is ON THE TABLE. This is
+        # only safe because object_goal_tracking now uses the LATCHED variant — the
+        # airborne-gated one would switch off exactly as the cube arrives, which is
+        # the contradiction that wrecked every earlier attempt at this task.
         #
         # x starts at 0.15, not 0.10. Goals close to the base are reachable but
         # CRAMPED, and raw reachability hides it: sampling arm poses that land in
@@ -122,7 +126,7 @@ class CommandsCfg:
         ranges=mdp.UniformPoseCommandCfg.Ranges(
             pos_x=(0.15, 0.30),
             pos_y=(-0.20, 0.20),
-            pos_z=(0.06, 0.20),
+            pos_z=(0.015, 0.020),
             roll=(0.0, 0.0),
             pitch=(0.0, 0.0),
             yaw=(0.0, 0.0),
@@ -167,10 +171,9 @@ class EventCfg:
 
     reset_all = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
 
-    # NOTE for Increment 1: `reset_lifted_latch` was removed with the place terms.
-    # Any term that gates on the was-lifted latch MUST come back together with
-    # `reset_lifted_latch = EventTerm(func=mdp.reset_lifted_latch, mode="reset")`,
-    # or the latch never clears and every episode after the first starts "lifted".
+    # Required by the latched goal tracking: without this the latch never clears
+    # and every episode after the first starts already "lifted".
+    reset_lifted_latch = EventTerm(func=mdp.reset_lifted_latch, mode="reset")
 
     # Spawn box, as an offset from the object's init pos [0.2, 0.0, 0.015], so
     # x in [0.10, 0.30], y in [-0.25, 0.25] in the robot base frame.
@@ -211,15 +214,25 @@ class RewardsCfg:
 
     lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=15.0)
 
+    # LATCHED, not height-gated. The goal is on the table, so tracking has to keep
+    # paying as the cube descends onto it; the airborne gate would switch off at
+    # exactly the moment of arrival. Once the cube has been genuinely picked this
+    # episode the latch stays set, so lift -> transport -> descent -> placed is
+    # monotonic and hovering scores strictly worse than setting down.
+    #
+    # lift_height 0.04 (not the old 0.06): the latch exists only to forbid sliding,
+    # and at 0.04 the cube's underside is 2.5 cm clear of the table, which no slide
+    # produces. 0.06 left a dead band above lifting_object's 0.025 where a higher
+    # lift bought nothing. Keep this value identical across every latched term.
     object_goal_tracking = RewTerm(
-        func=mdp.object_goal_distance,
-        params={"std": 0.3, "minimal_height": 0.025, "command_name": "object_pose"},
+        func=mdp.object_goal_distance_latched,
+        params={"std": 0.3, "lift_height": 0.04, "command_name": "object_pose"},
         weight=16.0,
     )
 
     object_goal_tracking_fine_grained = RewTerm(
-        func=mdp.object_goal_distance,
-        params={"std": 0.05, "minimal_height": 0.025, "command_name": "object_pose"},
+        func=mdp.object_goal_distance_latched,
+        params={"std": 0.05, "lift_height": 0.04, "command_name": "object_pose"},
         weight=5.0,
     )
 
