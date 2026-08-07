@@ -176,22 +176,39 @@ class EventCfg:
     reset_lifted_latch = EventTerm(func=mdp.reset_lifted_latch, mode="reset")
 
     # Spawn box, as an offset from the object's init pos [0.2, 0.0, 0.015], so
-    # x in [0.10, 0.30], y in [-0.25, 0.25] in the robot base frame.
+    # x in [0.15, 0.30], y in [-0.20, 0.20] in the robot base frame — now IDENTICAL
+    # to the goal box, which is one less thing to reason about.
     #
-    # y widened from +-0.20. Sampling the SO-101 fingertip workspace off the URDF
-    # (top-down capable, fingertips at the cube's centre height) gives a y reach of
-    # +-0.267 at x=0.30 and +-0.35 nearer the base, so every corner of this box is
-    # inside the envelope with >=1.7 cm of margin.
+    # Narrowed from x[0.10,0.30] y[+-0.25] because 1e still dragged the cube instead
+    # of picking it up, mostly on close/outer spawns. Re-measured LOCAL configuration
+    # density (samples landing within 2.5 cm of a target on the table, 3M draws,
+    # fingertip = gripper_link + the ee_frame offset, batched FK verified exact
+    # against soarmrl.kinematics.ee_position):
     #
-    # x is left alone on purpose: the envelope narrows fast with distance, so
-    # pushing the far edge past 0.30 puts the far CORNERS out of reach even though
-    # the far centre is fine. Widening x means shaping the region (or sampling in
-    # polar coords), not stretching the rectangle.
+    #   y=0.00   x0.10 74.6%   x0.20 45.6%   x0.30 34.1%   (share of the best point)
+    #   y=+-0.20 x0.10 47.6%   x0.20 32.6%   x0.30 27.1%
+    #   y=+-0.25 x0.10 34.0%   x0.20 27.2%   x0.30 24.3%
+    #
+    # The OUTER CORNERS are the cramped region, not the near band — y=+-0.25 sits at
+    # 23-35% of peak everywhere, worse than any x band. Dropping y to +-0.20 removes
+    # them.
+    #
+    # CORRECTION to the note that justified dd6924f's goal-box floor: that sweep
+    # found near targets config-starved (x[0.10,0.12) at 1.95% vs 6.20% at
+    # x[0.24,0.26)). It was run when the goal box was AIRBORNE at z 0.06-0.20, where
+    # reaching up-and-close does force a fold. At table height the relationship
+    # INVERTS — density is highest near the base. Do not reuse that number here.
+    #
+    # The real cost of near targets at table height is elbow fold, not scarcity:
+    # mean |elbow_flex| 1.111 rad at x=0.10 against 0.709 at x=0.30. That is mild
+    # support for the 0.15 floor. FK also cannot see self-collision, which is
+    # exactly what bites reaching over the arm's own base, so the floor is partly an
+    # empirical call from watching play.
     reset_object_position = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.1, 0.1), "y": (-0.25, 0.25), "z": (0.0, 0.0)},
+            "pose_range": {"x": (-0.05, 0.1), "y": (-0.20, 0.20), "z": (0.0, 0.0)},
             "velocity_range": {},
             "asset_cfg": SceneEntityCfg("object", body_names="Object"),
         },
@@ -259,16 +276,30 @@ class RewardsCfg:
     That was wrong. The phases are disjoint but the EFFECTS were not: the place terms
     fell 20-25% and the run could not say which term caused it. Ship one at a time.
 
-    1e (here) keeps ``joint_deviation_l1`` and drops ``grasp_top_down``, because the
-    evidence is asymmetric — joint_deviation did its job (position_error 0.360 ->
-    0.294, and the curve went from a random walk to flat and stable after 1600),
-    while grasp_top_down earned 3.6% of its ceiling. If the place terms return to 1c
-    levels, grasp_top_down was the cost. If they stay down, joint_deviation is the
-    culprit despite appearances and it goes too.
+    1e dropped grasp_top_down and kept joint_deviation. Result: the place terms
+    recovered ~40% of the 1d gap, so the ~22% regression splits roughly evenly —
+    grasp_top_down cost ~9%, joint_deviation costs ~13%. joint_deviation stays
+    anyway: it is the only thing holding the arm still (position_error 0.360 ->
+    0.296) and 1e posted the best success rate the task has produced, 9.72%.
+    Placement terms paying slightly less per step while MORE placements succeed
+    means those terms are shaping, not scoring.
 
-    Known side effect of joint_deviation, not a bug: pulling the arm toward its
-    default pose creates a return-to-home motion after every place where 1c simply
-    parked, and that motion is most of why action_rate went -0.389 -> -0.896.
+    Correction to a claim made in 1d: the action_rate blowout to -0.896 was NOT
+    joint_deviation's return-to-home motion. 1e kept joint_deviation and action_rate
+    came back to -0.652, so the blowout was grasp_top_down, or the two terms pulling
+    against each other — wrist toward vertical, whole arm toward default.
+
+    INCREMENT 1f — two changes, from watching play: it still drags instead of
+    picking up, and it still carries contorted. Both are the same defect. See
+    ``grasp_top_down`` and ``EventCfg.reset_object_position`` below.
+
+    Bundling caveat, given 1d: the spawn box and grasp_top_down change together, so a
+    change in overall success is not attributable. grasp_top_down stays judgeable on
+    its own though — inverting its logged value recovers cos_down directly, and that
+    is a statement about the gripper, not about the task distribution.
+
+    ``place_success`` is NOT comparable to 1e's 9.72% after this — a smaller spawn
+    box is an easier task. The baseline resets.
 
     NOT wired, on purpose: ``place_success`` as a TERMINATION. See its note below.
     """
@@ -389,20 +420,34 @@ class RewardsCfg:
         weight=8.0,
     )
 
-    # grasp_top_down is UNWIRED again — 1d tried it at w5/std 0.2 and it earned
-    # 0.0218 against a 0.6 ceiling, 3.6%. It learned nothing while the place terms
-    # fell 20-25% across the board, so the policy gave up real reward and got
-    # nothing back.
+    # The contorted carry, second attempt. 1d ran this at std 0.2 and it earned
+    # 0.0218 against a 0.6 ceiling — 3.6%, i.e. it learned nothing.
     #
-    # Why it failed, from its own logged value: raw 0.00436 / 0.118 lift duty /
-    # (near ~ 1) puts down_reward at 0.037, and inverting the tanh gives
-    # cos_down ~ 0.60 — the gripper sits at least 53 degrees off vertical for the
-    # whole carry. std 0.2 is still nearly FLAT that far out, so there was no
-    # gradient to climb from where the policy actually lives. The contortion is
-    # real and measured; this term as tuned does not touch it.
+    # Its own logged value says why: raw 0.00436 / 0.118 lift duty / (near ~ 1) puts
+    # down_reward at 0.037, and inverting the tanh gives cos_down ~ 0.60 — the
+    # gripper sits at least 53 degrees off vertical for the entire carry. std 0.2 is
+    # still nearly FLAT that far out, so there was no gradient to climb from where
+    # the policy actually lives. The term was not wrong, it was pointed at a region
+    # the policy never visits.
     #
-    # If it comes back: std 0.5, which gives ~3x the pull at cos_down 0.6, and on
-    # its own. Do not re-bundle it.
+    # std 0.5 gives ~3x the pull at cos_down 0.60. Kernel values for reference:
+    #   cos_down  0.60   0.75   0.90   1.00
+    #   std 0.2   0.037  0.245  0.537  1.000   <- 1d, flat exactly where it mattered
+    #   std 0.5   0.311  0.537  0.803  1.000   <- graded across the whole range
+    #
+    # This is also the fix for the DRAGGING: a gripper 53 degrees off vertical closes
+    # on the cube from the side and shoves it. A drag never sets the latch, so it
+    # earns nothing anywhere in this reward set — it is a failure mode, not a farm.
+    #
+    # Un-farmable via lifted_now: zero while the cube is on the table, so the policy
+    # cannot park open-handed over a grounded cube collecting posture (the run 5-8
+    # dead end where lifting_object collapsed to 0). Weight 5 is unchanged from 1d so
+    # std is the only variable on this term.
+    grasp_top_down = RewTerm(
+        func=mdp.grasp_top_down,
+        params={"std": 0.5, "near_std": 0.1, "min_height": 0.03},
+        weight=5.0,
+    )
 
     # action penalty
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
@@ -543,24 +588,27 @@ class CurriculumCfg:
 class PickPlaceEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the pick-and-place environment.
 
-    INCREMENT 1e. The lineage: step 0 reset the MDP to the lift task's rewards and
+    INCREMENT 1f. The lineage: step 0 reset the MDP to the lift task's rewards and
     moved only the spawn and goal boxes; 1a put the goal on the table and added the
     goal/cube separation constraint; 1b made finishing the place pay more than
     hovering over it; 1c turned the resulting drop into a controlled release; 1d
     priced the ARM for the first time and regressed the place by bundling two terms;
-    1e (here) keeps the half that worked. See ``RewardsCfg`` for the measurements
-    behind each and ``SOARMRL/docs/pickplace_contract.md`` for the increment plan.
+    1e kept the half that worked; 1f (here) goes after the drag and the contorted
+    carry. See ``RewardsCfg`` for the measurements behind each and
+    ``SOARMRL/docs/pickplace_contract.md`` for the increment plan.
 
-    The boxes, unchanged since 1a:
+    The boxes, now identical to each other:
 
-      * spawn x[0.10,0.30], y[-0.25,0.25] on the table;
-      * goal x[0.15,0.30], y[-0.20,0.20], z[0.015,0.020] — on the table, at the
-        cube's resting centre height, at least 0.12 from the cube in XY.
+      * spawn x[0.15,0.30], y[-0.20,0.20] on the table (1f: was x[0.10,0.30],
+        y[-0.25,0.25] — the outer corners were the cramped region);
+      * goal  x[0.15,0.30], y[-0.20,0.20], z[0.015,0.020], at the cube's resting
+        centre height and at least 0.12 from the cube in XY.
 
-    Both were sized against the SO-101 fingertip workspace sampled off the URDF,
-    not guessed. The original goal box was ~68-72% reachable on this arm — it was
-    the SO-100 (-y forward) convention, inherited through the clone and never
-    re-derived.
+    Both are sized against the SO-101 fingertip workspace sampled off the URDF, not
+    guessed; see ``EventCfg.reset_object_position`` for the current numbers and for
+    a correction to the density claim that justified the goal-box floor. The
+    original goal box was ~68-72% reachable on this arm — it was the SO-100 (-y
+    forward) convention, inherited through the clone and never re-derived.
 
     Everything in ``mdp/`` is now wired except ``place_success`` as a TERMINATION
     and ``object_orientation_to_target``. Both are deliberate — see ``RewardsCfg``.
