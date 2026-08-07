@@ -254,11 +254,21 @@ class RewardsCfg:
     gated off), so the advantage landscape in arm-space is flat for the last ~3.5 s
     and PPO's entropy bonus fills the vacuum with noise.
 
-    Three changes, acting in disjoint phases so a failure stays interpretable:
-      * ``grasp_top_down`` — only while the cube is off the table (~12%);
-      * ``joint_deviation_l1`` — only decisive after the release, where it is the
-        sole remaining gradient;
-      * ``place_success`` — a logged success rate, no gradient worth the name.
+    1d shipped ``grasp_top_down`` and ``joint_deviation_l1`` together, on the
+    argument that they act in disjoint phases so a failure would stay interpretable.
+    That was wrong. The phases are disjoint but the EFFECTS were not: the place terms
+    fell 20-25% and the run could not say which term caused it. Ship one at a time.
+
+    1e (here) keeps ``joint_deviation_l1`` and drops ``grasp_top_down``, because the
+    evidence is asymmetric — joint_deviation did its job (position_error 0.360 ->
+    0.294, and the curve went from a random walk to flat and stable after 1600),
+    while grasp_top_down earned 3.6% of its ceiling. If the place terms return to 1c
+    levels, grasp_top_down was the cost. If they stay down, joint_deviation is the
+    culprit despite appearances and it goes too.
+
+    Known side effect of joint_deviation, not a bug: pulling the arm toward its
+    default pose creates a return-to-home motion after every place where 1c simply
+    parked, and that motion is most of why action_rate went -0.389 -> -0.896.
 
     NOT wired, on purpose: ``place_success`` as a TERMINATION. See its note below.
     """
@@ -379,28 +389,20 @@ class RewardsCfg:
         weight=8.0,
     )
 
-    # The contorted grasp — the failure mode that actually causes misses in play.
-    # Nothing else in this reward set prices the arm's CONFIGURATION: every place
-    # term is a function of the cube alone, so a folded sideways carry that lands
-    # the cube correctly scores exactly like a clean top-down one.
+    # grasp_top_down is UNWIRED again — 1d tried it at w5/std 0.2 and it earned
+    # 0.0218 against a 0.6 ceiling, 3.6%. It learned nothing while the place terms
+    # fell 20-25% across the board, so the policy gave up real reward and got
+    # nothing back.
     #
-    # Active only while the cube is off the table (~12% of the episode now), so it
-    # shapes the carry and cannot fight the release. The lifted_now gate is what
-    # makes it un-farmable — in runs 5-8 an ungated version was collected by parking
-    # open-handed over a grounded cube and lifting_object collapsed to 0.
+    # Why it failed, from its own logged value: raw 0.00436 / 0.118 lift duty /
+    # (near ~ 1) puts down_reward at 0.037, and inverting the tanh gives
+    # cos_down ~ 0.60 — the gripper sits at least 53 degrees off vertical for the
+    # whole carry. std 0.2 is still nearly FLAT that far out, so there was no
+    # gradient to climb from where the policy actually lives. The contortion is
+    # real and measured; this term as tuned does not touch it.
     #
-    # std 0.2, not the 0.1 default: at 0.1 only a near-perfect top-down pays
-    # (cos_down 0.9 scores 0.24, 0.7 scores 0.005) which is a cliff, not a gradient.
-    # At 0.2 those become 0.54 and 0.10, so there is something to climb.
-    #
-    # weight 5 matches fine tracking. During the carry the competing live terms are
-    # lifting_object 3 and coarse tracking 16 — enough to break the tie between a
-    # contorted and a clean carry, not enough to outbid the transport itself.
-    grasp_top_down = RewTerm(
-        func=mdp.grasp_top_down,
-        params={"std": 0.2, "near_std": 0.1, "min_height": 0.03},
-        weight=5.0,
-    )
+    # If it comes back: std 0.5, which gives ~3x the pull at cos_down 0.6, and on
+    # its own. Do not re-bundle it.
 
     # action penalty
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
@@ -541,13 +543,13 @@ class CurriculumCfg:
 class PickPlaceEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the pick-and-place environment.
 
-    INCREMENT 1d. The lineage: step 0 reset the MDP to the lift task's rewards and
+    INCREMENT 1e. The lineage: step 0 reset the MDP to the lift task's rewards and
     moved only the spawn and goal boxes; 1a put the goal on the table and added the
     goal/cube separation constraint; 1b made finishing the place pay more than
     hovering over it; 1c turned the resulting drop into a controlled release; 1d
-    (here) prices the ARM, which nothing until now has done. See ``RewardsCfg`` for
-    the measurements behind each and ``SOARMRL/docs/pickplace_contract.md`` for the
-    increment plan.
+    priced the ARM for the first time and regressed the place by bundling two terms;
+    1e (here) keeps the half that worked. See ``RewardsCfg`` for the measurements
+    behind each and ``SOARMRL/docs/pickplace_contract.md`` for the increment plan.
 
     The boxes, unchanged since 1a:
 
