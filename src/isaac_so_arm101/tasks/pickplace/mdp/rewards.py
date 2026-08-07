@@ -18,7 +18,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
 from isaaclab.utils.math import combine_frame_transforms, quat_apply, quat_error_magnitude, quat_mul
 
-from .place import object_was_lifted
+from .place import gripper_joint_pos, object_was_lifted
 
 # The gripper's APPROACH direction in the gripper's local frame (normalized): the
 # axis that must point world-down for a clean top-down grasp. This IS the ee_frame
@@ -284,10 +284,9 @@ def object_released(
     robot: RigidObject = env.scene[robot_cfg.name]
     object: RigidObject = env.scene[object_cfg.name]
     
-    # Gripper openness
-    gripper_idx = robot_cfg.joint_ids[0]  # assuming single gripper joint
-    gripper_pos = robot.data.joint_pos[:, gripper_idx]
-    gripper_open = (gripper_pos > gripper_open_thresh).float()
+    # Gripper openness. Requires robot_cfg to be passed in the term's params dict,
+    # not left as the signature default — see gripper_joint_pos.
+    gripper_open = (gripper_joint_pos(robot, robot_cfg) > gripper_open_thresh).float()
     
     # At target (inherits the anti-slide latch gate)
     at_target = object_at_target_on_table(

@@ -33,6 +33,37 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
+def gripper_joint_pos(robot: RigidObject, robot_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Gripper joint position, (num_envs,), from a cfg that selects exactly one joint.
+
+    ``SceneEntityCfg.joint_ids`` defaults to ``slice(None)`` and only becomes a list
+    of indices when ``.resolve(scene)`` turns ``joint_names`` into ``joint_ids``. The
+    managers resolve only the ``SceneEntityCfg`` objects they find in a term's
+    ``params`` dict — a cfg left as a function-signature default is never resolved.
+    So ``robot_cfg.joint_ids[0]`` raises ``TypeError: 'slice' object is not
+    subscriptable`` on the first step unless the term passes ``robot_cfg`` in params.
+
+    Every term before Increment 1c used ``robot_cfg`` only for ``root_state_w``,
+    which needs no resolution, so nothing caught this until a term first read a
+    joint.
+
+    Raising beats coping here. The tempting fix — index with ``joint_ids`` and mean
+    over whatever comes back — turns an unresolved cfg into the mean of ALL SIX joint
+    angles, which is arm posture, not gripper aperture. That trains happily and
+    silently rewards the wrong thing.
+    """
+    joint_pos = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    if joint_pos.ndim != 2 or joint_pos.shape[-1] != 1:
+        n = joint_pos.shape[-1] if joint_pos.ndim == 2 else "all"
+        raise ValueError(
+            f"Expected a SceneEntityCfg selecting exactly one gripper joint, got {n} joints "
+            f"(joint_ids={robot_cfg.joint_ids!r}, joint_names={robot_cfg.joint_names!r}). "
+            "Pass robot_cfg=SceneEntityCfg('robot', joint_names=['gripper']) in the term's "
+            "params dict so the manager resolves it — a signature default is not resolved."
+        )
+    return joint_pos.squeeze(-1)
+
+
 def object_was_lifted(
     env: ManagerBasedRLEnv,
     lift_height: float,
@@ -107,8 +138,7 @@ def place_complete(
     )
 
     # gripper open
-    gripper_idx = robot_cfg.joint_ids[0]
-    gripper_open = robot.data.joint_pos[:, gripper_idx] > gripper_open_thresh
+    gripper_open = gripper_joint_pos(robot, robot_cfg) > gripper_open_thresh
 
     # end-effector withdrawn from the cube
     ee_pos = ee_frame.data.target_pos_w[..., 0, :]

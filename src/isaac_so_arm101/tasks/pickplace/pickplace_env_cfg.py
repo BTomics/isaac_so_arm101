@@ -341,6 +341,12 @@ class RewardsCfg:
     # perfectly still in a closed gripper at the goal; released additionally demands
     # the gripper be OPEN. Keeping released the larger of the two makes letting go
     # strictly better than holding on, which is the entire point of the increment.
+    # robot_cfg MUST be passed here, not left as the function's signature default.
+    # The managers resolve only the SceneEntityCfg objects they find in params, and
+    # an unresolved cfg keeps joint_ids = slice(None) — which crashed on step one
+    # with "TypeError: 'slice' object is not subscriptable". This is the first term
+    # in the task to read a JOINT rather than root_state_w, which is why nothing
+    # caught it earlier.
     object_released = RewTerm(
         func=mdp.object_released,
         params={
@@ -350,6 +356,7 @@ class RewardsCfg:
             "gripper_open_thresh": 0.25,
             "lift_height": 0.04,
             "command_name": "object_pose",
+            "robot_cfg": SceneEntityCfg("robot", joint_names=["gripper"]),
         },
         weight=8.0,
     )
