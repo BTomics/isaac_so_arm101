@@ -134,6 +134,36 @@ def object_goal_distance_latched(
     return lifted * (1 - torch.tanh(distance / std))
 
 
+def object_ee_distance_before_lift(
+    env: ManagerBasedRLEnv,
+    std: float,
+    lift_height: float,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reaching reward that switches OFF once the cube has been picked.
+
+    ``object_ee_distance`` rewards the end-effector for closing on the cube, which
+    is what finds the grasp. After the pick it becomes actively harmful: the place
+    is only complete when the gripper has LET GO and withdrawn (``place_complete``
+    requires ``ee_clearance`` > 5 cm), so an always-on reach term pays the arm to
+    hold on to the cube it is supposed to release. Increment 1b measured the
+    conflict — reaching_object settled at 0.266, i.e. an EE-cube distance of 4.7 cm,
+    sitting right on that 5 cm boundary.
+
+    Gating on the was-lifted latch rather than current height means the term does
+    not flicker back on when the cube is set down: once picked, this episode is
+    past the reaching phase for good.
+
+    Read-only on the latch (``update=False``) — the latched tracking terms run
+    every step and keep it current. On the single step where the cube first clears
+    ``lift_height`` this may read one step stale and pay once more; harmless.
+    """
+    reach = object_ee_distance(env, std, object_cfg, ee_frame_cfg)
+    lifted = object_was_lifted(env, lift_height, object_cfg, update=False)
+    return (1.0 - lifted) * reach
+
+
 def object_ee_distance_and_lifted(
     env: ManagerBasedRLEnv,
     std: float,

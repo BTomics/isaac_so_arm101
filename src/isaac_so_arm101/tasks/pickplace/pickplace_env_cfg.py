@@ -217,18 +217,44 @@ class RewardsCfg:
     62% -> 70% while fine tracking FELL 0.183 -> 0.162 and orientation_error rose
     1.68 -> 1.80. PPO found the profitable side of that trade, which is hovering.
 
-    Two changes flip the sign:
-      * ``object_at_target_on_table`` below — until now NO term paid for the cube
+    Two changes flipped the sign:
+      * ``object_at_target_on_table`` below — until then NO term paid for the cube
         resting at the goal, the one state the task is actually about;
       * ``lifting_object`` decays 15 -> 3 in ``CurriculumCfg``, so the bootstrap
         stops outbidding the placement once the pick is established.
 
-    Still unwired for Increment 1c: ``object_released``, ``object_at_rest``,
-    ``place_success`` + ``place_success_bonus`` (the release), and
-    ``grasp_top_down`` (the contorted carrying posture).
+    1b worked: object_at_target reached 2.38 and was still climbing at 4000, fine
+    tracking went 0.162 -> 1.311 (cube ~4 cm from the goal, from ~9), position_error
+    0.208 -> 0.159.
+
+    INCREMENT 1c — the controlled release. 1b's policy reaches the goal and then
+    DROPS the cube: reaching_object fell 0.590 -> 0.266 (EE 2.0 cm -> 4.7 cm from
+    the cube) and lift duty fell 70% -> 13%. Nothing objected, because
+    object_at_target scores a dropped cube and a placed cube identically once both
+    are at rest, and the joint_vel penalty pays the arm to let go and go still.
+
+    Three changes, all about the release:
+      * ``object_at_rest`` and ``object_released`` wired below — velocity-gated, so
+        they pay only once the cube has genuinely settled;
+      * ``reaching_object`` switches off after the pick, because it was paying the
+        arm to hold on to the cube it is supposed to release.
+
+    Still unwired for Increment 1d: ``place_success`` + ``place_success_bonus`` (the
+    bonus has a sizing constraint — it must out-value the dense reward forgone by
+    ending the episode early — that is best not mixed with the release terms), and
+    ``grasp_top_down`` (the contorted carry; orientation_error is up at 2.40).
     """
 
-    reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.05}, weight=1.0)
+    # Switches off once the cube is picked. An always-on reach term pays the arm to
+    # keep hold of the cube it is meant to release, and directly contradicts the
+    # success condition (place_complete wants the EE >5 cm clear). 1b measured it
+    # at 0.266 = 4.7 cm, right on that boundary. lift_height 0.04 matches the other
+    # latched terms.
+    reaching_object = RewTerm(
+        func=mdp.object_ee_distance_before_lift,
+        params={"std": 0.05, "lift_height": 0.04},
+        weight=1.0,
+    )
 
     lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=15.0)
 
@@ -275,6 +301,57 @@ class RewardsCfg:
         func=mdp.object_at_target_on_table,
         params={"xy_std": 0.05, "z_std": 0.02, "lift_height": 0.04, "command_name": "object_pose"},
         weight=12.0,
+    )
+
+    # INCREMENT 1c — the controlled release.
+    #
+    # Both terms multiply the at-target gate by velocity thresholds, and that
+    # product is what separates a PLACE from a DROP. object_at_target alone cannot:
+    # a cube released 5 cm up that lands on the goal ends in the same state as one
+    # set down gently, so 1b's policy learned to drop (reaching_object 0.59 -> 0.266
+    # as the EE withdrew, lift duty 70% -> 13%).
+    #
+    # A dropped cube is in flight, then bounces and rolls; at 0.02 m/s and
+    # 0.05 rad/s neither term pays a cent until it has actually settled. A placed
+    # cube pays from the moment it touches down. Over an episode that is the
+    # settling time plus the accuracy a bounce costs — a real gradient toward
+    # setting the cube down, though an indirect one.
+    #
+    # Honest limitation: this rewards the settled END STATE, it does not penalise
+    # impact speed. If 1c still drops, the next lever is an impact-velocity penalty
+    # as its own term (contract §Increment 1 trap catalogue), not more weight here.
+    #
+    # Thresholds are copied from place_complete deliberately — the shaping should
+    # aim at the exact predicate the 1d success termination will test, or the policy
+    # learns to sit just outside it.
+    object_at_rest = RewTerm(
+        func=mdp.object_at_rest,
+        params={
+            "lin_vel_thresh": 0.02,
+            "ang_vel_thresh": 0.05,
+            "xy_std": 0.05,
+            "z_std": 0.02,
+            "lift_height": 0.04,
+            "command_name": "object_pose",
+        },
+        weight=5.0,
+    )
+
+    # Weighted above object_at_rest on purpose. at_rest is satisfied by a cube held
+    # perfectly still in a closed gripper at the goal; released additionally demands
+    # the gripper be OPEN. Keeping released the larger of the two makes letting go
+    # strictly better than holding on, which is the entire point of the increment.
+    object_released = RewTerm(
+        func=mdp.object_released,
+        params={
+            "lin_vel_thresh": 0.02,
+            "xy_std": 0.05,
+            "z_std": 0.02,
+            "gripper_open_thresh": 0.25,
+            "lift_height": 0.04,
+            "command_name": "object_pose",
+        },
+        weight=8.0,
     )
 
     # action penalty
@@ -364,11 +441,12 @@ class CurriculumCfg:
 class PickPlaceEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the pick-and-place environment.
 
-    INCREMENT 1b. The lineage: step 0 reset the MDP to the lift task's rewards and
+    INCREMENT 1c. The lineage: step 0 reset the MDP to the lift task's rewards and
     moved only the spawn and goal boxes; 1a put the goal on the table and added the
-    goal/cube separation constraint; 1b (here) makes finishing the place pay more
-    than hovering over it. See ``RewardsCfg`` for the measurement that motivated it
-    and ``SOARMRL/docs/pickplace_contract.md`` for the increment plan.
+    goal/cube separation constraint; 1b made finishing the place pay more than
+    hovering over it; 1c (here) turns the resulting drop into a controlled release.
+    See ``RewardsCfg`` for the measurements behind each and
+    ``SOARMRL/docs/pickplace_contract.md`` for the increment plan.
 
     The boxes, unchanged since 1a:
 
@@ -381,8 +459,8 @@ class PickPlaceEnvCfg(ManagerBasedRLEnvCfg):
     the SO-100 (-y forward) convention, inherited through the clone and never
     re-derived.
 
-    Still unwired: the release (``object_released``, ``object_at_rest``,
-    ``place_success`` + bonus) and ``grasp_top_down``. Increment 1c.
+    Still unwired: ``place_success`` + ``place_success_bonus``, and
+    ``grasp_top_down``. Increment 1d.
     """
 
     # Scene settings
