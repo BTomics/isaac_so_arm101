@@ -239,10 +239,28 @@ class RewardsCfg:
       * ``reaching_object`` switches off after the pick, because it was paying the
         arm to hold on to the cube it is supposed to release.
 
-    Still unwired for Increment 1d: ``place_success`` + ``place_success_bonus`` (the
-    bonus has a sizing constraint — it must out-value the dense reward forgone by
-    ending the episode early — that is best not mixed with the release terms), and
-    ``grasp_top_down`` (the contorted carry; orientation_error is up at 2.40).
+    1c solved the release and then converged. ``at_rest/at_target`` = 0.937 and
+    ``released/at_target`` = 0.941 — 94% of the time the cube is at the target it is
+    also settled AND the gripper is open, so it is placing rather than dropping.
+    Every curve plateaued at ~3000 and held. Accuracy did NOT regress against 1b
+    despite at_target reading 12% lower: fine tracking 1.311 -> 1.205 (-8%) but
+    COARSE tracking 9.53 -> 10.02 (+5%), and at_target is the only one of the three
+    carrying a z-gate.
+
+    INCREMENT 1d — the arm, not the cube. Every term above is a function of the CUBE
+    alone. The arm's configuration is unpriced, which produces the two things visible
+    in play: a contorted carry, and a random flail after the release. The flail is
+    the sharper diagnosis — post-release, no term reads the arm (reaching_object is
+    gated off), so the advantage landscape in arm-space is flat for the last ~3.5 s
+    and PPO's entropy bonus fills the vacuum with noise.
+
+    Three changes, acting in disjoint phases so a failure stays interpretable:
+      * ``grasp_top_down`` — only while the cube is off the table (~12%);
+      * ``joint_deviation_l1`` — only decisive after the release, where it is the
+        sole remaining gradient;
+      * ``place_success`` — a logged success rate, no gradient worth the name.
+
+    NOT wired, on purpose: ``place_success`` as a TERMINATION. See its note below.
     """
 
     # Switches off once the cube is picked. An always-on reach term pays the arm to
@@ -361,6 +379,29 @@ class RewardsCfg:
         weight=8.0,
     )
 
+    # The contorted grasp — the failure mode that actually causes misses in play.
+    # Nothing else in this reward set prices the arm's CONFIGURATION: every place
+    # term is a function of the cube alone, so a folded sideways carry that lands
+    # the cube correctly scores exactly like a clean top-down one.
+    #
+    # Active only while the cube is off the table (~12% of the episode now), so it
+    # shapes the carry and cannot fight the release. The lifted_now gate is what
+    # makes it un-farmable — in runs 5-8 an ungated version was collected by parking
+    # open-handed over a grounded cube and lifting_object collapsed to 0.
+    #
+    # std 0.2, not the 0.1 default: at 0.1 only a near-perfect top-down pays
+    # (cos_down 0.9 scores 0.24, 0.7 scores 0.005) which is a cliff, not a gradient.
+    # At 0.2 those become 0.54 and 0.10, so there is something to climb.
+    #
+    # weight 5 matches fine tracking. During the carry the competing live terms are
+    # lifting_object 3 and coarse tracking 16 — enough to break the tie between a
+    # contorted and a clean carry, not enough to outbid the transport itself.
+    grasp_top_down = RewTerm(
+        func=mdp.grasp_top_down,
+        params={"std": 0.2, "near_std": 0.1, "min_height": 0.03},
+        weight=5.0,
+    )
+
     # action penalty
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
 
@@ -368,6 +409,58 @@ class RewardsCfg:
         func=mdp.joint_vel_l2,
         weight=-1e-4,
         params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    # The post-release flail. Once the cube is down, NO term above is a function of
+    # arm configuration — they all read the cube, and reaching_object is gated off.
+    # The advantage landscape in arm-space goes flat for the last ~3.5 s of every
+    # episode, and PPO's entropy bonus drives the policy to maximum randomness
+    # exactly where the advantage is flat. The arm thrashes because nothing scores
+    # any pose above any other.
+    #
+    # A regularizer is the right shape of fix: negligible during the approach, where
+    # reach (1) and tracking (16) dwarf it, and decisive after the release, where it
+    # is the ONLY gradient left. In a flat region magnitude does not set direction,
+    # only how hard it pulls — so keep it small and let the approach stay uncontam-
+    # inated. -0.02 x a typical few-rad deviation is ~-0.06/step against ~46.
+    #
+    # This also cleans up Metrics/object_pose/*: those measure gripper_link, so the
+    # random walk was inflating them. 1c's rising position_error 0.25 -> 0.36 was
+    # mostly the flail eating a growing share of each episode as placement got
+    # faster, NOT a degrading grasp.
+    joint_deviation = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.02,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    # METRIC, not an objective. Logs Episode_Reward/place_success = the fraction of
+    # steps in the genuine success state (the full place_complete AND: lifted this
+    # episode, within 2 cm of the commanded XY, at table height, at rest in lin AND
+    # ang velocity, gripper open, EE withdrawn 5 cm).
+    #
+    # Weight 1.0 rather than 0.0 because the logged value is weight x term — a zero
+    # weight logs a constant zero and measures nothing. At 1.0 the number IS the
+    # success rate with no divisor to misremember, and it contributes ~2% of the
+    # reward stack, aligned with the task and gated on a predicate too strict to
+    # farm.
+    #
+    # Deliberately NOT a termination. Ending the episode on success forfeits the
+    # remaining dense reward (~46/step, ~160 of return at a 1.5 s placement), which
+    # no one-shot bonus can outbid; the policy would learn to hover the EE inside
+    # the 5 cm clearance to keep the annuity running. See place_success_bonus's
+    # docstring for the failure mode that produces.
+    #
+    # robot_cfg passed explicitly — this term reads a JOINT, so an unresolved
+    # SceneEntityCfg would leave joint_ids as slice(None).
+    place_success = RewTerm(
+        func=mdp.place_success_bonus,
+        params={
+            "command_name": "object_pose",
+            "lift_height": 0.04,
+            "robot_cfg": SceneEntityCfg("robot", joint_names=["gripper"]),
+        },
+        weight=1.0,
     )
 
 
@@ -448,12 +541,13 @@ class CurriculumCfg:
 class PickPlaceEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the pick-and-place environment.
 
-    INCREMENT 1c. The lineage: step 0 reset the MDP to the lift task's rewards and
+    INCREMENT 1d. The lineage: step 0 reset the MDP to the lift task's rewards and
     moved only the spawn and goal boxes; 1a put the goal on the table and added the
     goal/cube separation constraint; 1b made finishing the place pay more than
-    hovering over it; 1c (here) turns the resulting drop into a controlled release.
-    See ``RewardsCfg`` for the measurements behind each and
-    ``SOARMRL/docs/pickplace_contract.md`` for the increment plan.
+    hovering over it; 1c turned the resulting drop into a controlled release; 1d
+    (here) prices the ARM, which nothing until now has done. See ``RewardsCfg`` for
+    the measurements behind each and ``SOARMRL/docs/pickplace_contract.md`` for the
+    increment plan.
 
     The boxes, unchanged since 1a:
 
@@ -466,8 +560,8 @@ class PickPlaceEnvCfg(ManagerBasedRLEnvCfg):
     the SO-100 (-y forward) convention, inherited through the clone and never
     re-derived.
 
-    Still unwired: ``place_success`` + ``place_success_bonus``, and
-    ``grasp_top_down``. Increment 1d.
+    Everything in ``mdp/`` is now wired except ``place_success`` as a TERMINATION
+    and ``object_orientation_to_target``. Both are deliberate — see ``RewardsCfg``.
     """
 
     # Scene settings
