@@ -202,12 +202,30 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the MDP.
 
-    STEP 0 RESET: this is the lift task's reward set, verbatim and unweighted-
-    changed. Eleven runs of place-reward surgery on top of it never produced a
-    pick, so the place terms are unwired (the functions stay in ``mdp/`` for
-    Increment 1) and the only variables moved are the spawn and goal boxes.
+    Built on the step-0 lift reward set, which earned the right to be extended:
+    two runs (4000 and 8000 iterations) picked the cube reliably and carried it to
+    the goal region. The bar set here — "do not add a term back without a run that
+    shows the pick surviving first" — is met, so Increment 1b wires the first
+    place term.
 
-    Do not add a term back without a run that shows the pick surviving first.
+    INCREMENT 1b — the descent. Run A (8000 iters) measured the policy refusing to
+    set the cube down, and the reward weights explain why. Holding the cube above
+    2.5 cm pays a flat 15/step. Setting it down at t=3s of a 5s episode forfeits
+    that for 40% of the episode (-6.0) and buys back at most +1.7 coarse tracking
+    and +1.85 fine tracking. Completing the place was a NET LOSS of ~2.5, and the
+    run behaved accordingly: between iteration 4000 and 8000 lift duty rose
+    62% -> 70% while fine tracking FELL 0.183 -> 0.162 and orientation_error rose
+    1.68 -> 1.80. PPO found the profitable side of that trade, which is hovering.
+
+    Two changes flip the sign:
+      * ``object_at_target_on_table`` below — until now NO term paid for the cube
+        resting at the goal, the one state the task is actually about;
+      * ``lifting_object`` decays 15 -> 3 in ``CurriculumCfg``, so the bootstrap
+        stops outbidding the placement once the pick is established.
+
+    Still unwired for Increment 1c: ``object_released``, ``object_at_rest``,
+    ``place_success`` + ``place_success_bonus`` (the release), and
+    ``grasp_top_down`` (the contorted carrying posture).
     """
 
     reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.05}, weight=1.0)
@@ -234,6 +252,29 @@ class RewardsCfg:
         func=mdp.object_goal_distance_latched,
         params={"std": 0.05, "lift_height": 0.04, "command_name": "object_pose"},
         weight=5.0,
+    )
+
+    # The state the task is about: cube at the commanded XY *and* down at table
+    # height. The two tracking terms above are 3D distance to the goal, so they
+    # are already near-maximal for a cube hovering a few cm above the target —
+    # they do not distinguish "held over the spot" from "placed on the spot".
+    # This one multiplies an XY kernel by a Z kernel, so the last few cm of
+    # descent are the steepest part of it.
+    #
+    # z_std 0.02, not 0.05: the whole point is resolving the final descent, and
+    # the cube's resting centre is only 1.5 cm off the table. A loose z kernel
+    # would pay nearly full value for a cube still in the gripper.
+    #
+    # weight 12 vs lifting_object's decayed 3: putting the cube down must beat
+    # holding it up by a clear margin, not by a coin flip.
+    #
+    # lift_height 0.04 matches the latched terms above, as their comment requires
+    # — this function is also a latch updater, and a second threshold would let
+    # one term set the latch that another still considers unset.
+    object_at_target = RewTerm(
+        func=mdp.object_at_target_on_table,
+        params={"xy_std": 0.05, "z_std": 0.02, "lift_height": 0.04, "command_name": "object_pose"},
+        weight=12.0,
     )
 
     # action penalty
@@ -282,15 +323,36 @@ class CurriculumCfg:
         func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
     )
 
-    # No reward decays here on purpose. Every decay tried on this task fired before
-    # the behaviour it was fading had actually been learned, and killed it:
+    # The one reward decay on this task. Read the history before touching it:
     #   - decaying object_goal_tracking to 0 removed the only pull toward the target
     #     and turned lifting_object into a hold-forever annuity (the frozen pose);
     #   - decaying lifting_object to 1 at iteration ~460 destroyed the pick entirely.
     #
-    # WATCH THE UNITS if a decay is ever reintroduced: modify_reward_weight's
-    # num_steps counts ENVIRONMENT steps, ~24 per training iteration. num_steps=12000
-    # fired at iteration ~500, not 12000 — a third of the way into a 1500-iter run.
+    # Both failed for the SAME reason — they fired before the behaviour they were
+    # fading had been learned. That is a statement about TIMING, not about decays.
+    # Run A dates the pick precisely: lifting_object leaves zero at iteration ~600
+    # and is still climbing at 8000. So iteration ~460 was squarely before the pick
+    # existed, and the lesson is "decay after the behaviour is established", not
+    # "never decay".
+    #
+    # This one fires at iteration ~1500 — 900 iterations after the pick appears —
+    # and lands on 3, not 1. lifting_object stays the strongest single term through
+    # the whole pick-learning phase; it only stops out-bidding object_at_target
+    # (weight 12) once the arm can already pick reliably.
+    #
+    # Prediction, so this is falsifiable: at ~1500 expect lifting_object's logged
+    # value to drop ~5x on the weight change alone (15 -> 3 is arithmetic, not
+    # behaviour) while object_at_target and the fine tracking term start to climb.
+    # If instead the PICK degrades — reaching_object falling, lifting duty
+    # collapsing toward zero — the decay is still too early even here, and the fix
+    # is num_steps 72000 (iteration ~3000), not abandoning the decay.
+    #
+    # WATCH THE UNITS: modify_reward_weight's num_steps counts ENVIRONMENT steps,
+    # ~24 per training iteration. This has bitten the project twice. 36000 / 24 =
+    # iteration ~1500. num_steps=12000 would fire at ~500, not 12000.
+    lifting_object = CurrTerm(
+        func=mdp.modify_reward_weight, params={"term_name": "lifting_object", "weight": 3.0, "num_steps": 36000}
+    )
 
 
 ##
@@ -302,21 +364,25 @@ class CurriculumCfg:
 class PickPlaceEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the pick-and-place environment.
 
-    STEP 0 RESET. This is the lift task's MDP — same rewards, same weights, same
-    terminations, same penalty curriculum — with exactly two things changed:
+    INCREMENT 1b. The lineage: step 0 reset the MDP to the lift task's rewards and
+    moved only the spawn and goal boxes; 1a put the goal on the table and added the
+    goal/cube separation constraint; 1b (here) makes finishing the place pay more
+    than hovering over it. See ``RewardsCfg`` for the measurement that motivated it
+    and ``SOARMRL/docs/pickplace_contract.md`` for the increment plan.
 
-      * the spawn box is wider in y (+-0.25 from +-0.20);
-      * the goal box moved in front of the arm and down (x[0.10,0.30],
-        y[-0.20,0.20], z[0.06,0.20], from x[-0.1,0.1] y[-0.3,-0.1] z[0.2,0.35]).
+    The boxes, unchanged since 1a:
 
-    Both boxes were sized against the SO-101 fingertip workspace sampled off the
-    URDF, not guessed. The old goal box was ~68-72% reachable on this arm — it was
+      * spawn x[0.10,0.30], y[-0.25,0.25] on the table;
+      * goal x[0.15,0.30], y[-0.20,0.20], z[0.015,0.020] — on the table, at the
+        cube's resting centre height, at least 0.12 from the cube in XY.
+
+    Both were sized against the SO-101 fingertip workspace sampled off the URDF,
+    not guessed. The original goal box was ~68-72% reachable on this arm — it was
     the SO-100 (-y forward) convention, inherited through the clone and never
     re-derived.
 
-    The place rewards and the success termination are written and unwired; see
-    ``RewardsCfg`` and ``SOARMRL/docs/pickplace_contract.md``. Re-wire them only
-    after a run shows the pick surviving the wider boxes.
+    Still unwired: the release (``object_released``, ``object_at_rest``,
+    ``place_success`` + bonus) and ``grasp_top_down``. Increment 1c.
     """
 
     # Scene settings
