@@ -112,19 +112,34 @@ class CommandsCfg:
         # airborne-gated one would switch off exactly as the cube arrives, which is
         # the contradiction that wrecked every earlier attempt at this task.
         #
-        # x starts at 0.15, not 0.10. Goals close to the base are reachable but
-        # CRAMPED, and raw reachability hides it: sampling arm poses that land in
-        # each x band, x[0.10,0.12) has only 1.95% of configurations versus 6.20%
-        # at x[0.24,0.26), and needs mean |shoulder_lift| 1.06 rad against 0.61.
-        # Few available configurations is what forces the folded, contorted pose —
-        # the geometry picks it, not the policy. Moving the floor to 0.15 also
-        # takes whole-box reachability from 92.4% to 99.6%.
+        # x[0.20,0.35], and DELIBERATELY not the same box the cube spawns in
+        # (spawn stays x[0.15,0.30] — see the reset event below). The 1f run tied
+        # them together; this splits them again for two measured reasons.
         #
-        # This reduces the pressure toward contortion but does not remove it:
-        # nothing in this reward set constrains posture. That is grasp_top_down's
-        # job (axis now corrected), in Increment 1.
+        # Floor 0.15 -> 0.20: the 12k policy places reliably except when the goal
+        # sits near the base, so the failing band is removed. NOTE this hides the
+        # cause rather than explaining it — x=0.15 has the BEST top-down
+        # availability anywhere in the workspace (mean cos_down 0.954 at y=0, 86%
+        # of peak configuration density), so geometry does not explain the misses.
+        # Suspect self-collision, which the FK sweep cannot see, or place_complete's
+        # 5 cm withdrawal. If near-base goals are ever wanted back, look there.
+        #
+        # Ceiling 0.30 -> 0.35 is a reach goal, not a fix. It is fully reachable
+        # (max fingertip radius 0.471 m, 0% unreachable over the whole box) but it
+        # costs posture, because top-down availability falls off hard with distance:
+        # mean cos_down 0.674 at x=0.30 y=0, 0.589 at x=0.35, and only 0.381 in the
+        # far corner (0.35, 0.20). Whole-box mean goes 0.766 -> 0.672.
+        #
+        # The SPAWN box does not follow it out. Cube spawns at x 0.35-0.40 would sit
+        # where cos_down is 0.35-0.43, attacking the pick — the part that took
+        # eleven runs to get working. Transport gets longer; the grasp stays in the
+        # region where it is known to work.
+        #
+        # Re-run scripts/tools/workspace.py before changing these; the numbers above
+        # are at TABLE height (z=0.015) and the density relationship inverts if you
+        # measure at an airborne height instead.
         ranges=mdp.UniformPoseCommandCfg.Ranges(
-            pos_x=(0.15, 0.30),
+            pos_x=(0.20, 0.35),
             pos_y=(-0.20, 0.20),
             pos_z=(0.015, 0.020),
             roll=(0.0, 0.0),
