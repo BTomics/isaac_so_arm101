@@ -174,3 +174,54 @@ class SoArm101PickPlaceEnvCfg_PLAY(SoArm101PickPlaceEnvCfg):
         self.scene.env_spacing = 2.5
         # disable randomization for play
         self.observations.policy.enable_corruption = False
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_RESUME(SoArm101PickPlaceEnvCfg):
+    """Use this for --resume. Never for a fresh run.
+
+    The curriculum counter lives on the env, and --resume builds a FRESH env, so
+    every modify_reward_weight term restarts and re-fires. That silently rewinds
+    the reward function underneath a trained policy:
+
+      - lifting_object snaps back to 15, which is the regime where hovering over
+        the target pays 27.2/step against 21.0 for completing the place. The
+        policy is actively pushed back toward not setting the cube down, for the
+        first ~1500 iterations of the resumed run.
+      - the penalty ramp restarts at -1e-4 and takes ~2500 iterations to climb
+        back, long enough for raw action_rate_l2 to grow again (it reached ~500
+        unconstrained, against ~24 under the full ramp).
+
+    This variant pins every curriculum'd weight to its converged value and clears
+    the curriculum, so the resumed reward function is identical to the one the
+    checkpoint was last trained under. Used by hand as a config edit before; this
+    makes it a task id instead, because the edit had to be reverted afterwards
+    and a fresh run at lifting_object=3 never bootstraps the pick.
+    """
+
+    # Converged endpoints. Must match the last stage of each curriculum in
+    # PickPlaceEnvCfg.CurriculumCfg.
+    PINNED = {"lifting_object": 3.0, "action_rate": -1e-1, "joint_vel": -1e-1}
+
+    def __post_init__(self):
+        # post init of parent
+        super().__post_init__()
+
+        # Clear the curriculum, refusing to guess about any term that does not
+        # target a weight pinned above - a new term would otherwise be silently
+        # dropped here and resume with whatever the config's base weight happens
+        # to be, which is exactly the failure this class exists to prevent.
+        for name, term in list(self.curriculum.__dict__.items()):
+            if term is None:
+                continue
+            target = term.params.get("term_name") if term.params else None
+            if target not in self.PINNED:
+                raise ValueError(
+                    f"Curriculum term {name!r} targets {target!r}, which is not in "
+                    f"SoArm101PickPlaceEnvCfg_RESUME.PINNED. Add its converged weight there "
+                    f"before resuming, or the resumed run silently uses the base weight."
+                )
+            setattr(self.curriculum, name, None)
+
+        for term_name, weight in self.PINNED.items():
+            getattr(self.rewards, term_name).weight = weight

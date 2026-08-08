@@ -55,3 +55,16 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+# For --resume ONLY. A fresh run on this task never bootstraps the pick, because
+# lifting_object starts at its decayed weight of 3 instead of 15. See
+# SoArm101PickPlaceEnvCfg_RESUME for why resuming the normal task is unsafe.
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-Resume-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_RESUME",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlacePPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
