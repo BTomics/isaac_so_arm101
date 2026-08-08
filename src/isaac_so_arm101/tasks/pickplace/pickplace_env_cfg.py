@@ -545,34 +545,43 @@ class TerminationsCfg:
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
 
-    # Back to the lift baseline's 10000 for the step-0 reset. That value is what
-    # the working lift policy was trained under, so keeping it means the boxes are
-    # the only variable in this run.
+    # 10000 = iteration ~417. DO NOT MOVE THIS OUT. Both attempts failed, in
+    # opposite directions, and together they say the free variable is the SIZE of
+    # the step, not where it lands.
     #
-    # 60000 = iteration ~2500, moved out from 10000 (~417). THE PREDICTION ABOVE
-    # CAME TRUE, on the run after the goal box went out to x[0.20,0.35]:
-    #   - object_released spiked repeatedly through 0-500, then went to EXACTLY
-    #     zero and never moved again; place_success fired twice and did the same.
-    #     So sporadic picks existed and stopped dead at the cliff.
-    #   - reaching_object swung 0.13-0.30 through ~500, then the OSCILLATION
-    #     COLLAPSED into a smooth line. That amplitude collapse is the mechanism:
-    #     a 1000x jump in the action_rate penalty damps exactly the action variance
-    #     exploration needs to stumble into a grasp.
-    #   - it then relearned the approach smoothly but far too slowly - 0.12 at 700
-    #     to 0.31 at 2209, still climbing, where a grasp needs ~0.85 (7.6 mm; 0.31
-    #     is 43 mm, so the gripper cannot close on a 3 cm cube).
+    # Run 11 (10000, first run on the wider goal box) - the pick never formed.
+    # lifting_object, object_at_rest, object_released, place_success and
+    # grasp_top_down all spiked through 0-500 and then read EXACTLY zero forever.
+    # Policy/mean_noise_std was CLIMBING - 1.0 through a peak above 2.75 at ~420 -
+    # then crashed vertically and decayed to 0.32 without recovering. Positive
+    # reward at the cliff was ~0.32 against penalties of -0.9 and -0.45, so the
+    # cheapest gradient was "stop moving", not "find the cube".
     #
-    # It was always a race and the margin was thin: 1f won it with the pick forming
-    # at ~600, i.e. AFTER the cliff, surviving on lifts entrenched just barely in
-    # time. Run 11 lost it. The penalties are not wrong - they cost ~6.6% of
-    # positive reward and improve alongside precision once the pick exists - they
-    # were just landing before it did.
+    # Run 12 (60000, ~2500) - the opposite failure, and worse. The pick formed
+    # fine (11.8% lift duty, 5.3% place success by 2500), then the cliff nuked it.
+    # With actions effectively free for 2500 iterations the fastest route to reward
+    # is fast jerky motion, so raw action_rate_l2 ran to ~500 - against 4.2 in
+    # converged 1f, i.e. 120x. The penalty landed at about -50/step, mean reward
+    # -59, and every learned behaviour was invalidated at once.
+    #
+    # So at ~417 this is not really a curriculum: it is "penalties on from the
+    # start" with a brief grace period, and the policy grows up under the
+    # constraint instead of meeting it later. That is the property that makes it
+    # work. The cost of a discontinuity scales with how much behaviour it
+    # disrupts - zero at 417, the whole policy at 2500.
+    #
+    # If it ever must change, RAMP it geometrically (-1e-3 at ~420, -1e-2 at ~1200,
+    # -1e-1 at ~2500) so no single step exceeds 10x. Do not just move the cliff.
+    #
+    # It is still a race, with a readable threshold at ~420: reaching_object ~0.48
+    # survives the dip and the pick takes off just after (step-0 reset and 1f);
+    # ~0.30 does not (run 11). That is a go/no-go visible ten minutes into a run.
     action_rate = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 60000}
+        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 10000}
     )
 
     joint_vel = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 60000}
+        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
     )
 
     # The one reward decay on this task. Read the history before touching it:
