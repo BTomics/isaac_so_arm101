@@ -56,6 +56,21 @@ gym.register(
     disable_env_checker=True,
 )
 
+# Evaluation only, for `play`. Perturbs object_position to stand in for real
+# perception error - the policy trains on simulator ground truth and has never
+# seen that input perturbed. Run all three and find where place_success falls
+# off; that is the accuracy spec for the camera. Never train on these.
+for _level, _cls in (("2mm", "NOISE2"), ("5mm", "NOISE5"), ("10mm", "NOISE10")):
+    gym.register(
+        id=f"Isaac-SO-ARM101-PickPlace-Noise{_level}-v0",
+        entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_{_cls}",
+            "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlacePPORunnerCfg",
+        },
+        disable_env_checker=True,
+    )
+
 # For --resume ONLY. A fresh run on this task never bootstraps the pick, because
 # lifting_object starts at its decayed weight of 3 instead of 15. See
 # SoArm101PickPlaceEnvCfg_RESUME for why resuming the normal task is unsafe.

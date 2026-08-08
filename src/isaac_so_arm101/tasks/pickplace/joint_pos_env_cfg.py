@@ -20,6 +20,7 @@ from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 from isaac_so_arm101.robots import SO_ARM100_CFG, SO_ARM101_CFG  # noqa: F401
 from isaac_so_arm101.tasks.pickplace.pickplace_env_cfg import PickPlaceEnvCfg
 
@@ -174,6 +175,57 @@ class SoArm101PickPlaceEnvCfg_PLAY(SoArm101PickPlaceEnvCfg):
         self.scene.env_spacing = 2.5
         # disable randomization for play
         self.observations.policy.enable_corruption = False
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_NOISE(SoArm101PickPlaceEnvCfg):
+    """Evaluation only: perturb object_position to stand in for real perception.
+
+    The trained policy reads the cube pose from
+    mdp.object_position_in_robot_root_frame - simulator ground truth, exact to
+    machine precision, and it has never seen anything else: enable_corruption is
+    True but not one ObsTerm carries a noise model, and EventCfg holds only
+    resets. On hardware that input becomes a camera and a pose estimator with
+    millimetres of error.
+
+    So the question this answers is not "does it work with noise" but "HOW
+    ACCURATE DOES MY PERCEPTION HAVE TO BE" - run the registered levels and find
+    where place_success falls off. That number is the spec for the camera.
+
+    NOT for training. Subclasses set NOISE_M in metres; only object_position is
+    perturbed, so the result is attributable to perception error alone rather
+    than to a bundle of physics changes. Joint encoder noise, cube friction/mass
+    randomisation and actuator latency are the other three transfer axes and are
+    deliberately NOT in here - add them one at a time or the answer is
+    uninterpretable, which is the mistake increment 1d already paid for.
+    """
+
+    NOISE_M = 0.005
+
+    def __post_init__(self):
+        # post init of parent
+        super().__post_init__()
+        self.observations.policy.object_position.noise = Unoise(
+            n_min=-self.NOISE_M, n_max=self.NOISE_M
+        )
+        # enable_corruption is already True on PolicyCfg; without it the noise
+        # model above is attached but never applied.
+        self.observations.policy.enable_corruption = True
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_NOISE2(SoArm101PickPlaceEnvCfg_NOISE):
+    NOISE_M = 0.002  # a good depth camera, cube well inside the frame
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_NOISE5(SoArm101PickPlaceEnvCfg_NOISE):
+    NOISE_M = 0.005  # realistic for a 3 cm cube at working distance
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_NOISE10(SoArm101PickPlaceEnvCfg_NOISE):
+    NOISE_M = 0.010  # a third of the cube's width; place_complete's xy threshold is 0.02
 
 
 @configclass
