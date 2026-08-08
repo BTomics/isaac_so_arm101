@@ -545,43 +545,72 @@ class TerminationsCfg:
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
 
-    # 10000 = iteration ~417. DO NOT MOVE THIS OUT. Both attempts failed, in
-    # opposite directions, and together they say the free variable is the SIZE of
-    # the step, not where it lands.
+    # GEOMETRIC RAMP, not a cliff. -1e-4 -> -1e-3 (~417) -> -1e-2 (~1250) ->
+    # -1e-1 (~2500). The endpoint is unchanged; only the path to it is. Terms must
+    # stay in ASCENDING num_steps order, because modify_reward_weight sets the
+    # weight on every step once num_steps is passed and later terms overwrite
+    # earlier ones in definition order.
     #
-    # Run 11 (10000, first run on the wider goal box) - the pick never formed.
-    # lifting_object, object_at_rest, object_released, place_success and
-    # grasp_top_down all spiked through 0-500 and then read EXACTLY zero forever.
-    # Policy/mean_noise_std was CLIMBING - 1.0 through a peak above 2.75 at ~420 -
-    # then crashed vertically and decayed to 0.32 without recovering. Positive
-    # reward at the cliff was ~0.32 against penalties of -0.9 and -0.45, so the
-    # cheapest gradient was "stop moving", not "find the cube".
+    # Three runs paid for this shape. A single 1000x step fails at BOTH ends:
     #
-    # Run 12 (60000, ~2500) - the opposite failure, and worse. The pick formed
-    # fine (11.8% lift duty, 5.3% place success by 2500), then the cliff nuked it.
-    # With actions effectively free for 2500 iterations the fastest route to reward
-    # is fast jerky motion, so raw action_rate_l2 ran to ~500 - against 4.2 in
-    # converged 1f, i.e. 120x. The penalty landed at about -50/step, mean reward
-    # -59, and every learned behaviour was invalidated at once.
+    #   Runs 11 and 13 (one step at ~417, wider goal box) - the pick never formed.
+    #   lifting_object, object_at_rest, object_released, place_success and
+    #   grasp_top_down all spiked through 0-500 and then read EXACTLY zero forever.
+    #   Policy/mean_noise_std was CLIMBING - 1.0 through a peak above 2.75 at ~420 -
+    #   then crashed vertically and decayed to 0.32 without recovering. Positive
+    #   reward at the cliff was ~0.32 against penalties of -0.9 and -0.45, i.e. the
+    #   penalty was ~4x the entire positive signal, so the cheapest gradient was
+    #   "stop moving" and not "find the cube". reaching_object read 0.105 at
+    #   iteration 440 in run 13, against ~0.48 in the runs that survived.
     #
-    # So at ~417 this is not really a curriculum: it is "penalties on from the
-    # start" with a brief grace period, and the policy grows up under the
-    # constraint instead of meeting it later. That is the property that makes it
-    # work. The cost of a discontinuity scales with how much behaviour it
-    # disrupts - zero at 417, the whole policy at 2500.
+    #   Run 12 (one step at ~2500) - the opposite failure, and worse. The pick
+    #   formed fine (11.8% lift duty, 5.3% place success), then the step nuked it.
+    #   With actions effectively free for 2500 iterations the fastest route to
+    #   reward is fast jerky motion, so raw action_rate_l2 ran to ~500 against 4.2
+    #   in converged 1f - 120x. The penalty landed at about -50/step, mean reward
+    #   -59, and every learned behaviour was invalidated at once.
     #
-    # If it ever must change, RAMP it geometrically (-1e-3 at ~420, -1e-2 at ~1200,
-    # -1e-1 at ~2500) so no single step exceeds 10x. Do not just move the cliff.
+    # The cost of a discontinuity scales with how much behaviour it disrupts, so
+    # moving a 1000x step later makes it strictly MORE dangerous. The ramp keeps
+    # mild pressure from ~417, which stops raw from ever running away, so the final
+    # step is small by the time it arrives:
     #
-    # It is still a race, with a readable threshold at ~420: reaching_object ~0.48
-    # survives the dip and the pick takes off just after (step-0 reset and 1f);
-    # ~0.30 does not (run 11). That is a go/no-go visible ten minutes into a run.
-    action_rate = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 10000}
+    #   ~417   raw ~9 (measured)     -> -0.009   2.8% of ~0.32 positive
+    #   ~1250  raw ~50 (estimated)   -> -0.5     ~10-15%
+    #   ~2500  raw ~20 (estimated)   -> -2.0     ~8%, vs 1f converged at 6.6%
+    #
+    # Only three raws have ever been measured: 9 at the cliff, ~500 unconstrained
+    # at 2500, and 4.2 in converged 1f. The middle rows are estimates.
+    #
+    # WHY THIS WAS NEEDED AT ALL - it is the wider goal box. Four runs separate
+    # perfectly on it: x[0.15,0.30] formed the pick at ~417 twice (step-0 reset,
+    # 1f), x[0.20,0.35] failed twice (runs 11, 13), and run 12 showed the pick
+    # forms fine on the wider box when the penalty is held off. The only path from
+    # a goal box to the pre-lift phase is the target_object_position OBSERVATION -
+    # every pre-lift reward is latched behind a lift that has not happened - and
+    # its mean x moved 0.225 -> 0.275, so a fresh policy biased to reach further
+    # out overshoots a cube still spawning in x[0.15,0.30].
+    #
+    # Go/no-go at ~420, visible ten minutes in: reaching_object ~0.48 survives the
+    # dip and the pick takes off just after; ~0.11-0.30 does not.
+    action_rate_1 = CurrTerm(
+        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-3, "num_steps": 10000}
+    )
+    action_rate_2 = CurrTerm(
+        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-2, "num_steps": 30000}
+    )
+    action_rate_3 = CurrTerm(
+        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 60000}
     )
 
-    joint_vel = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
+    joint_vel_1 = CurrTerm(
+        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-3, "num_steps": 10000}
+    )
+    joint_vel_2 = CurrTerm(
+        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-2, "num_steps": 30000}
+    )
+    joint_vel_3 = CurrTerm(
+        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 60000}
     )
 
     # The one reward decay on this task. Read the history before touching it:
