@@ -60,9 +60,15 @@ gym.register(
 # perception error - the policy trains on simulator ground truth and has never
 # seen that input perturbed. Run all three and find where place_success falls
 # off; that is the accuracy spec for the camera. Never train on these.
-for _level, _cls in (("2mm", "NOISE2"), ("5mm", "NOISE5"), ("10mm", "NOISE10")):
+#
+# Noise* resamples EVERY STEP, so the policy low-pass-filters it over a 250-step
+# episode and shrugs off even 10 mm. Bias* draws ONE offset per episode and holds
+# it, which is how a miscalibrated camera actually fails - nothing to average
+# out. Bias is the real test; where it breaks is the calibration budget.
+for _name, _cls in (("Noise2mm", "NOISE2"), ("Noise5mm", "NOISE5"), ("Noise10mm", "NOISE10"),
+                    ("Bias2mm", "BIAS2"), ("Bias5mm", "BIAS5"), ("Bias10mm", "BIAS10")):
     gym.register(
-        id=f"Isaac-SO-ARM101-PickPlace-Noise{_level}-v0",
+        id=f"Isaac-SO-ARM101-PickPlace-{_name}-v0",
         entry_point="isaaclab.envs:ManagerBasedRLEnv",
         kwargs={
             "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_{_cls}",

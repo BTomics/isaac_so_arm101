@@ -18,9 +18,16 @@ from isaaclab.sensors.frame_transformer.frame_transformer_cfg import (
 )
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+
+# `mdp` above is the UPSTREAM lift mdp, which has no pickplace terms. The eval
+# variants below need the local one, so it is imported under its own name rather
+# than shadowing an alias the rest of this file depends on.
+import isaac_so_arm101.tasks.pickplace.mdp as pickplace_mdp
 from isaac_so_arm101.robots import SO_ARM100_CFG, SO_ARM101_CFG  # noqa: F401
 from isaac_so_arm101.tasks.pickplace.pickplace_env_cfg import PickPlaceEnvCfg
 
@@ -211,6 +218,52 @@ class SoArm101PickPlaceEnvCfg_NOISE(SoArm101PickPlaceEnvCfg):
         # enable_corruption is already True on PolicyCfg; without it the noise
         # model above is attached but never applied.
         self.observations.policy.enable_corruption = True
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_BIAS(SoArm101PickPlaceEnvCfg):
+    """Evaluation only: a PER-EPISODE CONSTANT offset on the cube position.
+
+    The _NOISE variants above resample every step, so the policy averages them
+    out over 250 steps and shrugs off +-10 mm. A miscalibrated camera does not
+    behave that way - it is wrong in the same direction for the whole episode,
+    and there is nothing to average. This is the harder and far more realistic
+    test, and where place_success falls off across the levels is the CALIBRATION
+    BUDGET for the camera mount.
+
+    Swaps the observation for the biased variant and adds the reset event that
+    redraws the bias. BOTH are required: the observation without the event holds
+    one draw forever and silently measures something else.
+    """
+
+    BIAS_M = 0.005
+
+    def __post_init__(self):
+        # post init of parent
+        super().__post_init__()
+        self.observations.policy.object_position = ObsTerm(
+            func=pickplace_mdp.object_position_biased, params={"max_bias": self.BIAS_M}
+        )
+        self.events.reset_object_position_bias = EventTerm(
+            func=pickplace_mdp.reset_object_position_bias,
+            mode="reset",
+            params={"max_bias": self.BIAS_M},
+        )
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_BIAS2(SoArm101PickPlaceEnvCfg_BIAS):
+    BIAS_M = 0.002  # a carefully calibrated mount
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_BIAS5(SoArm101PickPlaceEnvCfg_BIAS):
+    BIAS_M = 0.005  # a realistic hand-eye calibration
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_BIAS10(SoArm101PickPlaceEnvCfg_BIAS):
+    BIAS_M = 0.010  # half of place_complete's 0.02 xy threshold, spent before the arm moves
 
 
 @configclass
