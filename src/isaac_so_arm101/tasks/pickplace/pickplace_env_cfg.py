@@ -549,17 +549,30 @@ class CurriculumCfg:
     # the working lift policy was trained under, so keeping it means the boxes are
     # the only variable in this run.
     #
-    # Pre-registered prediction, since this fires at iteration ~417: if
-    # reaching_object climbs and then falls back around there, these are the cause
-    # (that is exactly what happened in run 10) and the wider boxes have made the
-    # pick harder to find before the penalties land. Push num_steps to 60000 and
-    # rerun — that is a clean single-variable follow-up, not a thing to pre-empt.
+    # 60000 = iteration ~2500, moved out from 10000 (~417). THE PREDICTION ABOVE
+    # CAME TRUE, on the run after the goal box went out to x[0.20,0.35]:
+    #   - object_released spiked repeatedly through 0-500, then went to EXACTLY
+    #     zero and never moved again; place_success fired twice and did the same.
+    #     So sporadic picks existed and stopped dead at the cliff.
+    #   - reaching_object swung 0.13-0.30 through ~500, then the OSCILLATION
+    #     COLLAPSED into a smooth line. That amplitude collapse is the mechanism:
+    #     a 1000x jump in the action_rate penalty damps exactly the action variance
+    #     exploration needs to stumble into a grasp.
+    #   - it then relearned the approach smoothly but far too slowly - 0.12 at 700
+    #     to 0.31 at 2209, still climbing, where a grasp needs ~0.85 (7.6 mm; 0.31
+    #     is 43 mm, so the gripper cannot close on a 3 cm cube).
+    #
+    # It was always a race and the margin was thin: 1f won it with the pick forming
+    # at ~600, i.e. AFTER the cliff, surviving on lifts entrenched just barely in
+    # time. Run 11 lost it. The penalties are not wrong - they cost ~6.6% of
+    # positive reward and improve alongside precision once the pick exists - they
+    # were just landing before it did.
     action_rate = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 10000}
+        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 60000}
     )
 
     joint_vel = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
+        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 60000}
     )
 
     # The one reward decay on this task. Read the history before touching it:
