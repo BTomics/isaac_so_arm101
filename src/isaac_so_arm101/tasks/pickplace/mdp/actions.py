@@ -76,6 +76,18 @@ class RateLimitedJointPositionAction(JointPositionAction):
         self._prev_target = self._asset.data.joint_pos[:, self._joint_ids].clone()
 
     def process_actions(self, actions: torch.Tensor):
+        # Bound the raw action BEFORE the parent maps it to a joint target.
+        #
+        # WHY (learned the hard way, 2026-08-20, crash at iteration 215): the rate
+        # clamp below makes every action beyond the band produce an IDENTICAL
+        # target, so there is no gradient opposing action growth. Delete the
+        # action-magnitude penalties on top of that and nothing bounds the policy
+        # output at all - mean_noise_std climbed 1.007 -> 1.55 from iteration zero
+        # and the value loss reached 1e31.
+        #
+        # +-5 with scale 0.5 is +-2.5 rad of target offset, ~80x max_delta, so this
+        # never binds on any useful behaviour. It only removes the runaway.
+        actions = actions.clamp(-self.cfg.max_raw_action, self.cfg.max_raw_action)
         super().process_actions(actions)
         step = self.cfg.slow * (self._processed_actions - self._prev_target)
         step = step.clamp(-self.cfg.max_delta, self.cfg.max_delta)
@@ -113,6 +125,17 @@ class RateLimitedJointPositionActionCfg(JointPositionActionCfg):
     Keep it below the actuator's velocity_limit_sim (1.5 rad/s = 0.05 rad/step
     at 30 Hz) so this term, not PhysX, is the binding constraint. Otherwise the
     rate limit the policy learns is not the one the config states.
+    """
+
+    max_raw_action: float = 5.0
+    """Hard bound on the raw policy output, before scaling.
+
+    A saturating action space has no gradient opposing action growth, so SOMETHING
+    has to bound it. This is the hard guarantee; the action_l2 reward term is the
+    soft one that supplies an actual gradient toward small actions. Both are
+    needed and they act at different points: this clamp bounds what reaches the
+    PLANT, action_l2 penalises env.action_manager.action, which is the unclamped
+    policy output, and the observation's own `clip` bounds what reaches the CRITIC.
     """
 
 

@@ -20,6 +20,7 @@ from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
@@ -532,12 +533,19 @@ class SoArm101PickPlaceEnvCfg_ALIGNED(SoArm101PickPlaceEnvCfg):
 
     MAX_DELTA = 0.03  # rad per 30 Hz step = 0.9 rad/s; see the cfg's docstring
     EPISODE_S = 8.0
+    ACTION_L2 = -0.01
 
     def __post_init__(self):
         super().__post_init__()
 
-        self.sim.dt = 1.0 / 60.0
-        self.decimation = 2
+        # 30 Hz CONTROL at 90 Hz PHYSICS. The first version of this ran dt 1/60 x
+        # decimation 2, which is also 30 Hz control - but it silently dropped
+        # physics from 100 Hz to 60 Hz, and this task's solver iteration counts and
+        # contact thresholds were tuned at 100. Only the control rate needed to
+        # change. 1.5x the physics cost of the base task, which is the price of not
+        # re-tuning contact for a grasp.
+        self.sim.dt = 1.0 / 90.0
+        self.decimation = 3
         self.sim.render_interval = self.decimation
 
         self.actions.arm_action = pickplace_mdp.RateLimitedJointPositionActionCfg(
@@ -559,7 +567,30 @@ class SoArm101PickPlaceEnvCfg_ALIGNED(SoArm101PickPlaceEnvCfg):
             if term.params.get("term_name") in ("action_rate", "joint_vel"):
                 setattr(self.curriculum, name, None)
 
+        # ...but NOT without an action-MAGNITUDE cost. Deleting the rate penalties
+        # in front of a saturating rate clamp left nothing bounding the policy
+        # output, and the first attempt at this config diverged at iteration 215:
+        # mean_noise_std climbing 1.007 -> 1.55 from step zero, value loss 1e31,
+        # then inf -> NaN. action_rate penalised how fast the action CHANGES;
+        # action_l2 penalises how BIG it is, which is the force that was missing.
+        #
+        # Arithmetic at -0.01: six actions at |a| ~ 1 gives action_l2 ~ 6, so
+        # -0.06/step against a measured ~3.4/step reward - under 2%, small enough
+        # not to suppress exploration. At |a| ~ 10 it is -6/step and bites hard,
+        # which is the point.
+        #
+        # NO CURRICULUM, deliberately. Its job is to bound from step zero, and a
+        # ramp would reintroduce exactly the discontinuity Run A exists to delete.
+        self.rewards.action_l2 = RewTerm(func=pickplace_mdp.action_l2,
+                                         weight=self.ACTION_L2)
+
         self.observations.policy.joint_vel.scale = 0.0
+
+        # last_action is 6 of the 28 observation dims, and mdp.last_action reads
+        # env.action_manager.action - the UNCLAMPED policy output, not the value
+        # the action term clamps internally. So the critic can be fed a runaway
+        # even when the plant cannot. This is the bound that protects the critic.
+        self.observations.policy.actions.clip = (-10.0, 10.0)
 
         self.episode_length_s = self.EPISODE_S
         self.commands.object_pose.resampling_time_range = (self.EPISODE_S, self.EPISODE_S)
