@@ -330,3 +330,144 @@ class SoArm101PickPlaceEnvCfg_RESUME(SoArm101PickPlaceEnvCfg):
 
         for term_name, weight in self.PINNED.items():
             getattr(self.rewards, term_name).weight = weight
+
+
+# ---------------------------------------------------------------------------
+# Deployment-path evaluation variants. EVALUATION ONLY - never train on these.
+#
+# The _NOISE/_BIAS variants above perturb what the policy SEES. These perturb
+# what its actions DO, which is the axis nobody has tested. The trained policy's
+# action becomes a joint target directly at 50 Hz; the deployed policy's action
+# goes through a 30 Hz loop, a 0.1 slow-blend and a 0.03 rad delta clamp before
+# it reaches a servo. Five things differ between training and deployment at once
+# (rate, blend, clamp, zeroed velocities, dead-reckoned cube) and the hardware
+# run changed all five together.
+#
+# Replay the 12000-iteration checkpoint through each one. The behaviour to match
+# is the 2026-08-20 run, taken with a goal INSIDE the trained box (the earlier
+# "parks 65 mm short" attractor turned out to be an out-of-distribution target,
+# not a policy failure):
+#
+#   - the arm does not track its own commands while carrying. Measured sag of
+#     0.085-0.098 rad on shoulder_lift and +0.042 on elbow_flex, held for
+#     hundreds of ticks, in the direction gravity pulls a loaded arm.
+#   - demand runs far ahead of delivery: elbow want +2.27 against sent +0.85,
+#     and by the time the arm arrives the policy has reversed. That is a
+#     phase-lagged oscillation, and the cube's distance to goal swings
+#     289 -> 355 -> 312 -> 347 mm rather than closing.
+#   - the release fires at 347 mm on a gripper channel that is swinging +-12,
+#     i.e. on noise rather than intent.
+#   - afterwards every joint goes static. PHASE_RELEASED freezes the tracked
+#     cube, so a memoryless policy fed a frozen observation emits a constant
+#     action forever. In training the post-release state is always near the
+#     goal; at 347 mm it is off-distribution and has no learned behaviour.
+#
+# If _DEPLOYED reproduces that, the failure has moved from a 12 second bench run
+# into a 4096-env simulator. If it does NOT, the actuation-path thesis is wrong
+# and the retrain should not be built on it.
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_DEPLOY30(SoArm101PickPlaceEnvCfg):
+    """Evaluation only: the 30 Hz control rate the bridge actually runs.
+
+    PickPlace trains at 50 Hz (sim.dt 0.01 x decimation 2). scripts/grasp/
+    pickplace_live.py runs it at HZ = 30.0, inherited from the reach bridge where
+    30 Hz was correct because reach trained at sim dt 1/60 x decimation 2. Nobody
+    chose 30 for this policy - it came along with the file.
+
+    Episode length is held at 5 s of WALL time, so the policy gets 150 steps here
+    against 250 in training. That is deliberate: the arm does not get extra
+    seconds because the loop is slower, and step count is not what the policy
+    perceives anyway (the network is memoryless).
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.sim.dt = 1.0 / 60.0
+        self.decimation = 2
+        self.sim.render_interval = self.decimation
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_BLEND(SoArm101PickPlaceEnvCfg):
+    """Evaluation only: the bridge's slow-blend and delta clamp in the loop.
+
+    Defaults mirror pickplace_live.py (slow 0.1, max_delta 0.03 rad). At 30 Hz
+    the blend alone is a ~0.32 s first-order lag, against a discount horizon of
+    1/(1-gamma) = 50 steps = 1.0 s at the trained rate.
+
+    The throttle has been tested on hardware as a binary - "opening it up makes
+    the arm dive, not carry" - and both settings are wrong. Throttled gives the
+    stuck fixed point; unthrottled gives a policy that never paid a smoothness
+    penalty driving a real arm at full tilt. There is no correct setting, which
+    is the argument for training inside the rate limit rather than tuning around
+    it.
+    """
+
+    SLOW = 0.1
+    MAX_DELTA = 0.03
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.actions.arm_action = pickplace_mdp.DeploymentJointPositionActionCfg(
+            asset_name="robot",
+            joint_names=["shoulder_.*", "elbow_flex", "wrist_.*"],
+            scale=0.5,
+            use_default_offset=True,
+            slow=self.SLOW,
+            max_delta=self.MAX_DELTA,
+        )
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_ZEROVEL(SoArm101PickPlaceEnvCfg):
+    """Evaluation only: the joint velocity block zeroed, as the bridge sends it.
+
+    grasp_bridge.build_grasp_obs zeroes obs[6:12] by default - six of 28
+    dimensions, 21% of the observation - because a finite difference of noisy,
+    USB-lagged encoder readings drove a sustained limit cycle on hardware.
+
+    This is the CORRECT-BASELINE comparison that has never been run. The hardware
+    test compared zeroed velocities against finite-difference velocities and
+    found "the same attractor to within a centimetre", which was read as
+    exonerating the velocity block. Both of those are wrong relative to sim's
+    true physics velocity; two wrong answers agreeing says nothing about the
+    right one. This variant asks the question that test did not.
+
+    scale=0.0 rather than deleting the term, so the observation stays 28-dim and
+    the result is attributable to the information loss alone, not to a changed
+    contract.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.observations.policy.joint_vel.scale = 0.0
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_DEPLOYED(SoArm101PickPlaceEnvCfg_BLEND):
+    """Evaluation only: rate, blend, clamp and zeroed velocities together.
+
+    The composition of the three variants above. This is the one to replay first;
+    the singles exist to attribute whatever it shows.
+
+    NOT YET FAITHFUL IN ONE RESPECT, and it is the largest one: object_position
+    here is still simulator ground truth. On hardware it comes from a three-phase
+    dead-reckoning estimator (grasp_bridge.object_position_for_tick) - a
+    hard-coded constant while seeking, forward kinematics of the jaw tip while
+    held, then FROZEN at the release point with z pinned to the table. Its errors
+    are structured, not Gaussian, so the _NOISE/_BIAS variants do not stand in
+    for it. Wiring that estimator into an ObsTerm is the remaining piece, and it
+    is the same term the retrain wants anyway (train on the estimator's output,
+    not on ground truth). Until it exists, read a negative result here as "not
+    reproduced BY THESE FOUR", never as "not reproduced".
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.sim.dt = 1.0 / 60.0
+        self.decimation = 2
+        self.sim.render_interval = self.decimation
+        self.observations.policy.joint_vel.scale = 0.0

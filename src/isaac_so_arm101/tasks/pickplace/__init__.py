@@ -77,6 +77,30 @@ for _name, _cls in (("Noise2mm", "NOISE2"), ("Noise5mm", "NOISE5"), ("Noise10mm"
         disable_env_checker=True,
     )
 
+# Evaluation only, for `play`. Perturbs what the actions DO rather than what the
+# policy sees: the 30 Hz control rate the bridge runs, its slow-blend and delta
+# clamp, and the zeroed velocity block. Together these are the deployed actuation
+# path, which the policy has never trained against.
+#
+# Run Deployed first and the three singles to attribute whatever it shows. The
+# signature to match, from the 2026-08-20 hardware run with an in-distribution
+# goal: the arm does not track its own commands while carrying (elbow demand ran
+# 1.4 rad ahead of what was sent, and reversed before the arm arrived), the cube
+# oscillates instead of approaching, the release fires early on a noisy gripper
+# channel, and the arm then freezes with every joint static. Reproducing that in
+# sim turns it into a regression test. Never train on these.
+for _name, _cls in (("Deploy30", "DEPLOY30"), ("Blend", "BLEND"),
+                    ("ZeroVel", "ZEROVEL"), ("Deployed", "DEPLOYED")):
+    gym.register(
+        id=f"Isaac-SO-ARM101-PickPlace-{_name}-v0",
+        entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_{_cls}",
+            "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlacePPORunnerCfg",
+        },
+        disable_env_checker=True,
+    )
+
 # For --resume ONLY. A fresh run on this task never bootstraps the pick, because
 # lifting_object starts at its decayed weight of 3 instead of 15. See
 # SoArm101PickPlaceEnvCfg_RESUME for why resuming the normal task is unsafe.
