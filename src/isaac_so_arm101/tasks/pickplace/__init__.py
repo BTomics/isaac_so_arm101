@@ -101,6 +101,35 @@ for _name, _cls in (("Deploy30", "DEPLOY30"), ("Blend", "BLEND"),
         disable_env_checker=True,
     )
 
+# Run A - the aligned baseline. THIS is the one to train. Sim's actuation path is
+# made the same path the bridge deploys: 30 Hz, a hard per-step rate limit
+# instead of a lag, no smoothness penalties (the rate limit subsumes them), the
+# velocity observation zeroed as the bridge sends it, an 8 s episode, and
+# gamma 0.99 so the discount horizon is the same order as the task length.
+#
+# The -Resume- variant pins lifting_object and clears the curriculum, same
+# contract as the original Resume task. It has far less to pin because Run A
+# deleted the penalty curriculum, which is precisely why resuming is now cheap.
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-Aligned-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_ALIGNED",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceAlignedPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-Aligned-Resume-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_ALIGNED_RESUME",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceAlignedPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
 # For --resume ONLY. A fresh run on this task never bootstraps the pick, because
 # lifting_object starts at its decayed weight of 3 instead of 15. See
 # SoArm101PickPlaceEnvCfg_RESUME for why resuming the normal task is unsafe.

@@ -471,3 +471,129 @@ class SoArm101PickPlaceEnvCfg_DEPLOYED(SoArm101PickPlaceEnvCfg_BLEND):
         self.decimation = 2
         self.sim.render_interval = self.decimation
         self.observations.policy.joint_vel.scale = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Run A - the aligned baseline. THIS ONE IS FOR TRAINING.
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_ALIGNED(SoArm101PickPlaceEnvCfg):
+    """Train here: sim's actuation path made the same path the bridge deploys.
+
+    Every change below serves one invariant - the plant the policy learns on and
+    the plant it is deployed into are the same plant. They ship together because
+    they are not independently meaningful: a rate limit at the wrong control rate
+    is not a smaller version of this change, it is an incoherent one.
+
+      1. 30 Hz control (sim.dt 1/60, decimation 2), matching the bridge exactly.
+         PickPlace trained at 50 Hz and has always been deployed at 30.
+      2. A hard per-step rate limit on the joint target, so clamp_delta at
+         deployment becomes a NO-OP instead of a distortion. The policy cannot
+         ask for more than the arm delivers, so it never builds a plan that
+         depends on doing so.
+      3. action_rate and joint_vel penalties DELETED, along with all six of their
+         curriculum stages. The rate limit enforces smoothness structurally, so
+         the penalties are paying twice for it. This removes the single largest
+         source of training instability in this task's history - three failed
+         runs, an entropy collapse, and a ~1000-iteration re-absorption tax on
+         every resume - and it is what livekit's so-frame does for the same
+         reason ("no smoothness penalties", with a per-step motion cap).
+      4. joint_vel OBSERVATION scaled to zero. The bridge zeroes those six dims
+         because a finite difference of lagged encoder readings drove a limit
+         cycle; training on true physics velocity means 6 of 28 inputs are
+         fiction at deployment. Kept at 28 dims so the bridge needs no change.
+      5. episode_length_s 5 -> 8. Four phases under a rate cap does not fit in
+         5 s; 8 s at 30 Hz is 240 steps, close to the old step budget. The
+         command resampling window moves with it or the goal changes mid-episode.
+
+    gamma 0.98 -> 0.99 is the sixth change and lives in the agent cfg
+    (PickPlaceAlignedPPORunnerCfg), because it is an algorithm parameter. At
+    50 Hz with gamma 0.98 the effective horizon was 1/(1-g) = 50 steps = ONE
+    SECOND against a five-second task. At 30 Hz with 0.99 it is 100 steps = 3.3 s.
+
+    WATCH FOR, in order of likelihood:
+      - the approach becoming too slow to reach the cube inside the episode.
+        That looks exactly like a broken reach reward. Check lift duty before
+        touching any weight.
+      - chatter within the cap. The rate limit bounds target SPEED, not
+        direction changes; a policy can still dither +-max_delta every step.
+        so-frame reports this is fine in practice, but if the renders look
+        buzzy that is what it is, and the answer is a smaller max_delta, not
+        the deleted penalties coming back.
+      - posture regressing after release. The penalties were incidentally
+        damping the post-release flail. The lever for that is joint_deviation.
+
+    Every reward number in docs/training_journey.md becomes incomparable across
+    this boundary: gamma and episode length both rescale returns. Say so in the
+    log rather than comparing across it.
+    """
+
+    MAX_DELTA = 0.03  # rad per 30 Hz step = 0.9 rad/s; see the cfg's docstring
+    EPISODE_S = 8.0
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.sim.dt = 1.0 / 60.0
+        self.decimation = 2
+        self.sim.render_interval = self.decimation
+
+        self.actions.arm_action = pickplace_mdp.RateLimitedJointPositionActionCfg(
+            asset_name="robot",
+            joint_names=["shoulder_.*", "elbow_flex", "wrist_.*"],
+            scale=0.5,
+            use_default_offset=True,
+            max_delta=self.MAX_DELTA,
+        )
+
+        # The penalties and their whole curriculum. Note the name collision:
+        # rewards.joint_vel is the penalty term, observations.policy.joint_vel is
+        # the six observation dims. Both change here, for unrelated reasons.
+        self.rewards.action_rate = None
+        self.rewards.joint_vel = None
+        for name, term in list(self.curriculum.__dict__.items()):
+            if term is None or not term.params:
+                continue
+            if term.params.get("term_name") in ("action_rate", "joint_vel"):
+                setattr(self.curriculum, name, None)
+
+        self.observations.policy.joint_vel.scale = 0.0
+
+        self.episode_length_s = self.EPISODE_S
+        self.commands.object_pose.resampling_time_range = (self.EPISODE_S, self.EPISODE_S)
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_ALIGNED_RESUME(SoArm101PickPlaceEnvCfg_ALIGNED):
+    """--resume for the aligned task. Never for a fresh run.
+
+    Far less to pin than the original RESUME variant, because Run A deleted the
+    penalty curriculum - only the lifting_object decay is left. That is the point
+    of deleting it: a resume no longer rewinds the reward function underneath a
+    trained policy, so it no longer costs ~1000 iterations to re-absorb.
+
+    lifting_object at 3.0 from step zero still never bootstraps a pick, so this
+    remains resume-only.
+    """
+
+    PINNED = {"lifting_object": 3.0}
+
+    def __post_init__(self):
+        super().__post_init__()
+        for name, term in list(self.curriculum.__dict__.items()):
+            if term is None:
+                continue
+            target = term.params.get("term_name") if term.params else None
+            if target not in self.PINNED:
+                raise ValueError(
+                    f"Curriculum term {name!r} targets {target!r}, which is not in "
+                    f"SoArm101PickPlaceEnvCfg_ALIGNED_RESUME.PINNED. Add its converged "
+                    f"weight there before resuming, or the resumed run silently uses "
+                    f"the base weight."
+                )
+            setattr(self.curriculum, name, None)
+
+        for term_name, weight in self.PINNED.items():
+            getattr(self.rewards, term_name).weight = weight

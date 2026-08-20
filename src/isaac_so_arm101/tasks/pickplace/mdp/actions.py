@@ -21,12 +21,22 @@ point on hardware instead of carrying the cube: it is driving a plant an order o
 magnitude slower than the one it learned on, with a discount horizon
 (gamma 0.98 at 50 Hz) of about one second.
 
-USE FOR EVALUATION FIRST. Replaying the existing checkpoint through this is what
-tells you whether the actuation path explains the hardware attractor, before
-spending a training run on the answer. If it does, the fix is NOT to keep this
-term: it is to train against a rate limit the policy can actually plan around
-(see the retrain plan's Run A), and then drop the blend at deployment because
-the policy no longer needs taming.
+TWO FORMS, and the difference is the whole point:
+
+  RateLimitedJointPositionActionCfg   slow=1.0  -- a hard rate limit. TRAIN on this.
+  DeploymentJointPositionActionCfg    slow=0.1  -- rate limit + the bridge's lag.
+                                                   EVALUATE on this, never train.
+
+A rate limit is a constraint the policy can plan around: it learns that a joint
+moves at most `max_delta` per step and paces itself. A blend is a lag that fights
+it: the policy asks for a move, gets 10% of it, asks harder, and by the time the
+arm arrives the policy has reversed. The 2026-08-20 hardware log is that failure
+written out -- elbow demand +2.27 rad against +0.85 sent, reversing to -0.12
+before the arm got there.
+
+So the sequence is: evaluate with the blend to confirm the diagnosis, train with
+the rate limit, then drop the blend at deployment because a policy that paces
+itself no longer needs taming.
 
 NOTE: the blend is applied in `process_actions`, which runs once per POLICY step.
 `apply_actions` runs once per SIM step -- decimation=2 -- so doing it there would
@@ -41,16 +51,28 @@ from isaaclab.envs.mdp.actions.joint_actions import JointPositionAction
 from isaaclab.utils import configclass
 
 
-class DeploymentJointPositionAction(JointPositionAction):
-    """JointPositionAction plus the bridge's slow-blend and per-tick delta clamp."""
+class RateLimitedJointPositionAction(JointPositionAction):
+    """JointPositionAction with a per-step cap on how far the target may move.
 
-    cfg: DeploymentJointPositionActionCfg
+    With `slow = 1.0` (the default) this is a pure rate limit: a hard ceiling on
+    joint speed that a policy can learn to plan around, and the form to TRAIN
+    against. With `slow < 1.0` it additionally reproduces the bridge's
+    exponential blend, which is a lag that fights the policy rather than a
+    constraint it can plan around -- that form is for evaluation only.
 
-    def __init__(self, cfg: DeploymentJointPositionActionCfg, env):
+    The clamp is against the previous COMMANDED target, not the measured joint
+    position, matching bridge.clamp_delta. Clamping against the measurement would
+    let a sagging joint drag the target down with it and turn the action space
+    into an integrator wrapped around the tracking error.
+    """
+
+    cfg: RateLimitedJointPositionActionCfg
+
+    def __init__(self, cfg: RateLimitedJointPositionActionCfg, env):
         super().__init__(cfg, env)
-        # Start from where the arm actually is, not from zero: a first tick that
-        # blends toward the target from an arbitrary origin is a transient the
-        # hardware never has, since the bridge seeds prev_sent from the encoders.
+        # Seed from where the arm actually is. The bridge seeds prev_sent from
+        # the encoders after its ramp, so starting anywhere else would give the
+        # first step a transient the hardware never has.
         self._prev_target = self._asset.data.joint_pos[:, self._joint_ids].clone()
 
     def process_actions(self, actions: torch.Tensor):
@@ -69,17 +91,38 @@ class DeploymentJointPositionAction(JointPositionAction):
 
 
 @configclass
-class DeploymentJointPositionActionCfg(JointPositionActionCfg):
-    """Defaults are the values scripts/grasp/pickplace_live.py actually deploys.
+class RateLimitedJointPositionActionCfg(JointPositionActionCfg):
+    """Training form: a hard rate limit, no blend."""
 
-    Keep them in sync with that file. If they drift apart, this term measures a
-    deployment path that does not exist, which is worse than not measuring one.
-    """
+    class_type: type = RateLimitedJointPositionAction
 
-    class_type: type = DeploymentJointPositionAction
-
-    slow: float = 0.1
-    """Blend factor per policy step; 1.0 disables the blend."""
+    slow: float = 1.0
+    """Blend factor per policy step. 1.0 = no blend, a pure rate limit."""
 
     max_delta: float = 0.03
-    """Per-step joint target change cap, radians."""
+    """Per-step joint target change cap, radians.
+
+    0.03 rad at 30 Hz is 0.9 rad/s. That is the one joint speed with hardware
+    evidence behind it: the deployed clamp sits at exactly this value, the
+    2026-08-20 log shows it saturated through the whole aggressive phase, and
+    the arm tracked it with bounded error -- so the servos demonstrably deliver
+    at least this much under load. It is a floor, not a measured ceiling; the
+    chirp and step profiles in SOARMRL's scripts/sysid/ are what turn it into a
+    real number.
+
+    Keep it below the actuator's velocity_limit_sim (1.5 rad/s = 0.05 rad/step
+    at 30 Hz) so this term, not PhysX, is the binding constraint. Otherwise the
+    rate limit the policy learns is not the one the config states.
+    """
+
+
+@configclass
+class DeploymentJointPositionActionCfg(RateLimitedJointPositionActionCfg):
+    """Evaluation form: the rate limit PLUS the bridge's slow-blend lag.
+
+    Defaults are the values scripts/grasp/pickplace_live.py actually deploys.
+    Keep them in sync with that file -- if they drift apart, this models a
+    deployment path that does not exist, which is worse than not modelling one.
+    """
+
+    slow: float = 0.1
