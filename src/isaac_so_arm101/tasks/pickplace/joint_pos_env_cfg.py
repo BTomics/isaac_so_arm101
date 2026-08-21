@@ -16,9 +16,10 @@ from isaaclab.sensors.frame_transformer.frame_transformer_cfg import (
     FrameTransformerCfg,
     OffsetCfg,
 )
-from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
+from isaaclab.sim.schemas.schemas_cfg import MassPropertiesCfg, RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.utils import configclass
@@ -621,6 +622,190 @@ class SoArm101PickPlaceEnvCfg_ALIGNED_RESUME(SoArm101PickPlaceEnvCfg_ALIGNED):
                 raise ValueError(
                     f"Curriculum term {name!r} targets {target!r}, which is not in "
                     f"SoArm101PickPlaceEnvCfg_ALIGNED_RESUME.PINNED. Add its converged "
+                    f"weight there before resuming, or the resumed run silently uses "
+                    f"the base weight."
+                )
+            setattr(self.curriculum, name, None)
+
+        for term_name, weight in self.PINNED.items():
+            getattr(self.rewards, term_name).weight = weight
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_DR(SoArm101PickPlaceEnvCfg_ALIGNED):
+    """Run B: the aligned plant, randomized around the numbers measured on the arm.
+
+    Run A made sim's actuation path the SAME path the bridge deploys, and it
+    worked - 74.4% per-episode place success (CI 70.5-78.0, 512 episodes) against
+    increment 2's 56.4% (52.1-60.7). But "the same path" is still ONE plant, and
+    the real arm is a different one every time it warms up. Run B trains on a
+    distribution instead of a point.
+
+    Every range below comes from scripts/sysid/ on 2026-08-21, not from a guess:
+
+      lag        101-202 ms across the six joints  -> delay_steps (1, 2) at 10 Hz
+      settling   300-390 ms                        -> the reason for 10 Hz
+      droop      up to 3.32 deg                    -> joint_offset 0.03 rad
+      deadband   0.6-3.6 deg                       -+
+
+    THE CHANGES
+
+    1. CONTROL RATE 30 -> 10 Hz (sim.dt 1/90, decimation 9). Physics stays at
+       90 Hz, so contact is untouched. Two independent reasons:
+
+       - the measurement. Settling takes 300-390 ms. At 30 Hz the policy issues
+         nine to twelve new targets inside one settle, none of which the servo
+         ever reaches. It is steering a plant that cannot hear it.
+       - the field. Both SO-101 pure-RL place results train at 10 Hz. livekit's
+         so-frame moved DOWN from 50 deliberately, and pairs it with a per-step
+         motion cap and no smoothness penalties - which is, term for term, the
+         action space Run A already arrived at independently. Squint (arXiv
+         2602.21203) trains at 10 Hz on a PD joint-position-delta controller.
+         Two groups, two simulators, same number.
+
+    2. MAX_DELTA 0.03 -> 0.09 rad/step. The rate cap is a SPEED, and the speed is
+       held fixed at 0.9 rad/s across the change: 0.03 rad per 1/30 s and 0.09 rad
+       per 1/10 s are the same arm. Rescaling is not optional - keeping 0.03 would
+       have silently cut the arm to a third of its speed and made Run B a
+       comparison of two things at once.
+
+       Still under velocity_limit_sim (1.5 rad/s), so this term stays the binding
+       constraint rather than PhysX.
+
+    3. TRANSPORT DELAY, 1-2 steps, per episode. See RateLimitedJointPositionActionCfg.
+
+    4. JOINT OFFSET, +-0.03 rad, per episode. Droop and deadband, applied to the
+       target because they are plant errors and the encoder is honest.
+
+    5. ACTUATOR GAINS x[0.7, 1.4], per episode. The stiffness a warm servo holds
+       is not the one in the config, and the policy should not be able to tell.
+
+    6. ENCODER NOISE +-0.0015 rad on joint_pos - one STS3215 encoder step
+       (0.088 deg, 4096/rev). This one IS per-step, correctly: quantization
+       really is fresh on every read. It is deliberately tiny; it is a floor on
+       sensing, not a randomization lever.
+
+    7. CUBE MASS AND FRICTION. The cube had NO DECLARED MASS - it inherited
+       whatever density the Nucleus DexCube USD ships, which nobody has read. So
+       mass is declared first (0.025 kg, the real cube on the bench) and only
+       then randomized x[0.6, 1.6]. Randomizing around an unknown nominal is not
+       domain randomization, it is a wider unknown.
+
+    8. INITIAL ARM POSE +-0.05 rad. reset_scene_to_default meant every episode of
+       every run to date started from the identical pose. That is a
+       generalization limit before it is a transfer gap.
+
+    NOT DONE, deliberately: the load-dependent position error from the plan. The
+    1.8-2.6 deg figure is published at 1.5 kg; the cube is 25 g, and the measured
+    sag under it was 0.16 deg. Modelling it would inject an error sixteen times
+    larger than the one the hardware actually has.
+
+    WATCH FOR: the number going DOWN relative to Run A's 74.4%, and that being
+    correct. A policy that holds 65% across a distribution of arms is worth more
+    than one that holds 74.4% on exactly one. The comparison that matters is the
+    hardware run; the sim comparison to make is Run B's policy against Run A's,
+    BOTH evaluated on this task.
+    """
+
+    MAX_DELTA = 0.09  # rad per 10 Hz step = 0.9 rad/s, the same speed as Run A
+    DELAY_STEPS = (1, 2)  # 100-200 ms at 10 Hz; measured lag is 101-202 ms
+    JOINT_OFFSET = 0.03  # rad, ~1.7 deg: droop 3.32 deg, deadband 0.6-3.6 deg
+    CUBE_MASS = 0.025  # kg, the cube on the bench
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # 10 Hz control, 90 Hz physics. decimation is the only thing that moves;
+        # sim.dt stays where Run A put it so contact behaviour is unchanged.
+        self.decimation = 9
+        self.sim.render_interval = self.decimation
+
+        self.actions.arm_action = pickplace_mdp.RateLimitedJointPositionActionCfg(
+            asset_name="robot",
+            joint_names=["shoulder_.*", "elbow_flex", "wrist_.*"],
+            scale=0.5,
+            use_default_offset=True,
+            max_delta=self.MAX_DELTA,
+            delay_steps=self.DELAY_STEPS,
+            joint_offset=self.JOINT_OFFSET,
+        )
+
+        # One encoder step. Per-step, unlike everything else here, because
+        # quantization genuinely is redrawn on every read.
+        self.observations.policy.joint_pos.noise = Unoise(n_min=-0.0015, n_max=0.0015)
+
+        # Declare the cube's mass before randomizing it. See point 7.
+        self.scene.object.spawn.mass_props = MassPropertiesCfg(mass=self.CUBE_MASS)
+
+        # Events run in declaration order within a mode, and these must all land
+        # AFTER reset_scene_to_default - otherwise the default reset overwrites
+        # them and the run silently trains with no randomization at all. setattr
+        # on a fresh name appends, which is why they go here and not in EventCfg.
+        self.events.randomize_actuator_gains = EventTerm(
+            func=mdp.randomize_actuator_gains,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+                "stiffness_distribution_params": (0.7, 1.4),
+                "damping_distribution_params": (0.7, 1.4),
+                "operation": "scale",
+                "distribution": "log_uniform",
+            },
+        )
+        self.events.randomize_cube_mass = EventTerm(
+            func=mdp.randomize_rigid_body_mass,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("object"),
+                "mass_distribution_params": (0.6, 1.6),
+                "operation": "scale",
+                "distribution": "uniform",
+                "recompute_inertia": True,
+            },
+        )
+        self.events.randomize_cube_friction = EventTerm(
+            func=mdp.randomize_rigid_body_material,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("object"),
+                "static_friction_range": (0.5, 1.2),
+                "dynamic_friction_range": (0.4, 1.0),
+                "restitution_range": (0.0, 0.1),
+                "num_buckets": 64,
+            },
+        )
+        self.events.randomize_start_pose = EventTerm(
+            func=mdp.reset_joints_by_offset,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "position_range": (-0.05, 0.05),
+                "velocity_range": (0.0, 0.0),
+            },
+        )
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_DR_RESUME(SoArm101PickPlaceEnvCfg_DR):
+    """--resume for Run B. Never for a fresh run.
+
+    Same contract as SoArm101PickPlaceEnvCfg_ALIGNED_RESUME and for the same
+    reason: lifting_object at 3.0 from step zero never bootstraps a pick, so its
+    curriculum has to be pinned rather than replayed under a trained policy.
+    """
+
+    PINNED = SoArm101PickPlaceEnvCfg_ALIGNED_RESUME.PINNED
+
+    def __post_init__(self):
+        super().__post_init__()
+        for name, term in list(self.curriculum.__dict__.items()):
+            if term is None:
+                continue
+            target = term.params.get("term_name") if term.params else None
+            if target not in self.PINNED:
+                raise ValueError(
+                    f"Curriculum term {name!r} targets {target!r}, which is not in "
+                    f"SoArm101PickPlaceEnvCfg_DR_RESUME.PINNED. Add its converged "
                     f"weight there before resuming, or the resumed run silently uses "
                     f"the base weight."
                 )

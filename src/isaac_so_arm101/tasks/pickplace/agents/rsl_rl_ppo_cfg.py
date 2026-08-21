@@ -83,3 +83,31 @@ class PickPlaceAlignedPPORunnerCfg(PickPlacePPORunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class PickPlaceDRPPORunnerCfg(PickPlaceAlignedPPORunnerCfg):
+    """Run B's agent. Identical to Run A's except for the experiment name.
+
+    That is deliberate. Run B changes the PLANT - control rate, delay, offsets,
+    randomized gains and cube. Changing the algorithm in the same run would make
+    the result unattributable, and this project has paid for that mistake before
+    (SLOW and ACTION_SCALE shipped together, ~4x aggressiveness, one run wasted).
+
+    gamma stays 0.99 and it means MORE at 10 Hz, not less: 1/(1-gamma) = 100
+    steps is 10 s of lookahead against an 8 s episode, so for the first time the
+    value function can see the whole task from the first frame. At Run A's 30 Hz
+    the same gamma bought 3.3 s of an 8 s task.
+
+    num_steps_per_env stays 24, which is now 2.4 s of episode rather than 0.8 s.
+    The batch size in samples is unchanged; the batch size in TASK TIME tripled.
+
+    WALL CLOCK: decimation 9 against Run A's 3 means three times the physics per
+    iteration, so expect roughly 4 s/iteration against Run A's 1.3 - about 13 h
+    for the full 12000 rather than 4.2. Per unit of simulated task time it is the
+    same cost; it is the iteration counter that changed meaning, not the price.
+    Do not compare Run A and Run B curves on the iteration axis.
+    """
+
+    experiment_name = "pickplace_dr"
+    max_iterations = 12000
