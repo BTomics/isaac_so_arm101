@@ -794,7 +794,11 @@ class SoArm101PickPlaceEnvCfg_DR_RESUME(SoArm101PickPlaceEnvCfg_DR):
     curriculum has to be pinned rather than replayed under a trained policy.
     """
 
-    PINNED = SoArm101PickPlaceEnvCfg_ALIGNED_RESUME.PINNED
+    # Spelled out rather than read off SoArm101PickPlaceEnvCfg_ALIGNED_RESUME:
+    # @configclass rebuilds the class and unannotated attributes are not
+    # readable from outside it, so referencing it there raises AttributeError
+    # at import. Keep the two in step by hand.
+    PINNED = {"lifting_object": 3.0}
 
     def __post_init__(self):
         super().__post_init__()
