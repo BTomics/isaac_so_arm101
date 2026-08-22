@@ -180,3 +180,26 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+
+# Run C: Run B with ACTION_L2 at -0.05 instead of -0.01, and nothing else. Its
+# own experiment_name so the logs do not mix with Run B's.
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-DR-C-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_DR_C",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceDRCPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-DR-C-Resume-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_DR_C_RESUME",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceDRCPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)

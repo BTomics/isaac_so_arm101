@@ -111,3 +111,15 @@ class PickPlaceDRPPORunnerCfg(PickPlaceAlignedPPORunnerCfg):
 
     experiment_name = "pickplace_dr"
     max_iterations = 12000
+
+
+@configclass
+class PickPlaceDRCPPORunnerCfg(PickPlaceDRPPORunnerCfg):
+    """Run C's agent. Only the experiment name differs from Run B's.
+
+    The change under test is ACTION_L2, which lives in the ENV cfg. Touching the
+    algorithm here as well would make the result unattributable - the mistake
+    increment 1d made and paid a whole run for.
+    """
+
+    experiment_name = "pickplace_dr_c"

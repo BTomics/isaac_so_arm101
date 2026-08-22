@@ -879,3 +879,114 @@ class SoArm101PickPlaceEnvCfg_DR_NOMINAL(SoArm101PickPlaceEnvCfg_DR):
         self.events.randomize_cube_mass = None
         self.events.randomize_cube_friction = None
         self.events.randomize_start_pose = None
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_DR_C(SoArm101PickPlaceEnvCfg_DR):
+    """Run C: ONE change from Run B - the action-magnitude penalty actually bites.
+
+    THE MEASUREMENT. Run B ended with action_l2 at -1.5853, which puts the RMS
+    policy output at about 5.14 per dimension against a max_raw_action clamp of
+    5.0. The term reads the UNCLAMPED action, so that means the policy spends
+    most steps asking for more than the plant will accept, on essentially every
+    dimension. Run A ended the same way at about 5.8.
+
+    WHY IT MATTERS MORE AT 10 Hz. A saturated policy can only move in units of
+    max_delta, because every step it asks for the maximum:
+
+        Run A   max_delta 0.03 rad  ->  1.72 deg per step
+        Run B   max_delta 0.09 rad  ->  5.16 deg per step
+
+    Both runs saturated, but Run B's saturation is three times COARSER. The
+    success predicate wants the cube inside 20 mm, and a policy whose finest
+    available move is five degrees on every joint cannot land that reliably. So
+    max_delta 0.09 was right as a SPEED - it holds 0.9 rad/s, the same arm - and
+    wrong in combination with saturation, where it stops being a ceiling and
+    becomes the step size.
+
+    The failure breakdown agrees. Of Run B's at-target kernel mass, 78% has the
+    gripper open and the cube still, and 73% is at rest - both legitimate
+    conditionals, since object_released and object_at_rest are object_at_target
+    multiplied by indicator gates. The sequence works: it picks, carries, sets
+    down and lets go. Strict place_success is 8.1% of episode time. Run B is not
+    failing at the structure of the task, it is missing the tolerance.
+
+    WHY -0.01 NEVER BOUND ANYTHING. It stayed at about 2% of the reward stack for
+    the entire run - 2% at iteration 939 with mean reward 50, still 1.6% at 11999
+    with mean reward 100. The penalty grew in step with the reward instead of
+    biting as actions grew, so it was never a constraint, only a tax.
+
+    -0.05 separates the two regimes:
+
+        |a| ~ 1   6 x 1 x 0.05  = -0.3/step   against ~100   0.3%
+        |a| ~ 5   6 x 25 x 0.05 = -7.5/step   against ~100   7.5%
+
+    Negligible while exploring, decisive once saturating. Note this does NOT
+    forbid a large action; the hard clamp already does that. It supplies the
+    GRADIENT toward small ones that a saturating action space cannot provide by
+    itself - which is the same argument that put action_l2 in Run A, just at a
+    weight that survives a reward stack thirty times larger than the one it was
+    sized against.
+
+    NOTHING ELSE MOVES. Not max_delta, not the rate, not the DR ranges. If Run C
+    beats Run B the credit is attributable to one number, and if it does not, the
+    next suspect is already named: 80 steps for five phases is 16 steps per
+    phase, which may simply be too tight at 10 Hz.
+    """
+
+    ACTION_L2 = -0.05
+
+    def __post_init__(self):
+        super().__post_init__()
+        # The entire run rests on this one number reaching the reward term.
+        # @configclass strips unannotated class attributes from the CLASS object
+        # (that is what broke SoArm101PickPlaceEnvCfg_DR_C_RESUME.PINNED), so an
+        # override that silently resolved to the parent's -0.01 would produce a
+        # rerun of Run B under Run C's name and cost 11 h to discover. Fail loudly
+        # at construction instead.
+        if self.rewards.action_l2.weight != -0.05:
+            raise ValueError(
+                f"Run C requires action_l2 weight -0.05, resolved "
+                f"{self.rewards.action_l2.weight}. The ACTION_L2 override did not "
+                f"reach the reward term, so this run would repeat Run B."
+            )
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_DR_C_RESUME(SoArm101PickPlaceEnvCfg_DR_C):
+    """--resume for Run C. This is the CHEAP experiment - use this one first.
+
+    Resuming Run B's checkpoint under the heavier penalty tests the hypothesis in
+    about 3 h instead of 11.6. Two numbers answer it:
+
+      action_l2 should climb from -1.5853 toward -0.3 as the RMS output drops
+      below the clamp, and place_success should rise from 0.0809.
+
+    If the output comes down and place_success does not follow, saturation was
+    not the binding constraint and the episode budget is next.
+
+    Changing a reward weight under a trained policy normally costs a re-absorption
+    period - that is exactly what deleting the penalty curriculum in Run A was
+    meant to stop. Expect a dip before any gain, and do not read the first ~500
+    iterations.
+    """
+
+    PINNED = {"lifting_object": 3.0}
+
+    def __post_init__(self):
+        super().__post_init__()
+        for name, term in list(self.curriculum.__dict__.items()):
+            if term is None:
+                continue
+            target = term.params.get("term_name") if term.params else None
+            if target not in self.PINNED:
+                raise ValueError(
+                    f"Curriculum term {name!r} targets {target!r}, which is not in "
+                    f"SoArm101PickPlaceEnvCfg_DR_C_RESUME.PINNED. Add its converged "
+                    f"weight there before resuming, or the resumed run silently uses "
+                    f"the base weight."
+                )
+            setattr(self.curriculum, name, None)
+
+        for term_name, weight in self.PINNED.items():
+            getattr(self.rewards, term_name).weight = weight
