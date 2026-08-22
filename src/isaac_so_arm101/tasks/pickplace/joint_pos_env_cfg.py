@@ -817,3 +817,65 @@ class SoArm101PickPlaceEnvCfg_DR_RESUME(SoArm101PickPlaceEnvCfg_DR):
 
         for term_name, weight in self.PINNED.items():
             getattr(self.rewards, term_name).weight = weight
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_DR_NOMINAL(SoArm101PickPlaceEnvCfg_DR):
+    """EVALUATION ONLY: Run B's plant with every randomization switched off.
+
+    WHY THIS EXISTS. The first three evals of Run B's policy could not answer the
+    question they were run to answer, because the Aligned task and the DR task
+    differ in TWO things, not one: randomization, and control rate (30 Hz /
+    max_delta 0.03 against 10 Hz / 0.09). So:
+
+      Run A on DR      1.2%   - mostly a rate mismatch, not a robustness result
+      Run B on Aligned 17.6%  - likewise, in the other direction
+      Run B on DR      21.1%  - the only clean number of the three
+
+    This task holds the rate fixed and removes only the randomization, which is
+    the comparison that was wanted. Run B's policy scored here against its 21.1%
+    on the DR task is the cost of randomization AT TEST TIME, with nothing else
+    moving.
+
+    It is also the closer predictor of HARDWARE. The real arm is one arm: a
+    single draw from the distribution, and a calibrated one. The DR task averages
+    over draws including the worst corner of every range at once - +-0.03 rad of
+    offset on every joint, 2-step delay, gains at 0.7x and a heavy cube - which is
+    a machine that does not exist. A policy can be worth deploying and still score
+    poorly against that average.
+
+    Reading it:
+      NOMINAL >> DR   the ranges are too wide; narrow them before retraining.
+      NOMINAL ~= DR   the policy is genuinely rate-limited or under-trained, and
+                      the action saturation at |a| ~ 5.14 is the first suspect.
+
+    Everything the DR cfg declared for the PLANT rather than for randomization
+    stays: 10 Hz, max_delta 0.09, and the cube's declared 25 g mass. Only the
+    draws are removed.
+    """
+
+    DELAY_STEPS = (0, 0)
+    JOINT_OFFSET = 0.0
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # Rebuild the action term at the parent's own settings so the two tasks
+        # cannot drift apart: same scale, same max_delta, only the per-episode
+        # draws removed.
+        self.actions.arm_action = pickplace_mdp.RateLimitedJointPositionActionCfg(
+            asset_name="robot",
+            joint_names=["shoulder_.*", "elbow_flex", "wrist_.*"],
+            scale=0.5,
+            use_default_offset=True,
+            max_delta=self.MAX_DELTA,
+            delay_steps=self.DELAY_STEPS,
+            joint_offset=self.JOINT_OFFSET,
+        )
+
+        self.observations.policy.joint_pos.noise = None
+
+        self.events.randomize_actuator_gains = None
+        self.events.randomize_cube_mass = None
+        self.events.randomize_cube_friction = None
+        self.events.randomize_start_pose = None

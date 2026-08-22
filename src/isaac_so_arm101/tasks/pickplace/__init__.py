@@ -166,3 +166,17 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+
+# EVAL ONLY. Run B's plant with the randomization off, so the DR task and this
+# one differ in exactly one thing. No agent of its own: it is always replayed
+# with the checkpoint whose task it is being compared against.
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-DR-Nominal-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_DR_NOMINAL",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceDRPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
