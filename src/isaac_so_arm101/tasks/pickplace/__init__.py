@@ -226,3 +226,26 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+
+# EVAL ONLY. Run D's policy at 30 Hz, with and without randomization - the two
+# missing corners of the rate x DR square. See SoArm101PickPlaceEnvCfg_DR_D_30HZ.
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-DR-D-30Hz-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_DR_D_30HZ",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceDRDPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-DR-D-30Hz-Nominal-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_DR_D_30HZ_NOMINAL",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceDRDPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)

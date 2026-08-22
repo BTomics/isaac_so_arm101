@@ -1077,3 +1077,112 @@ class SoArm101PickPlaceEnvCfg_DR_D_RESUME(SoArm101PickPlaceEnvCfg_DR_D):
 
         for term_name, weight in self.PINNED.items():
             getattr(self.rewards, term_name).weight = weight
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_DR_D_30HZ(SoArm101PickPlaceEnvCfg_DR_D):
+    """EVALUATION ONLY: Run D's policy driven at 30 Hz instead of 10.
+
+    THE QUESTION. Runs C and D each fixed a real defect - action saturation, then
+    a transport gradient that paid the arm to keep the cube on the table - and
+    neither moved the success rate off ~21%. So the ceiling is elsewhere, and the
+    largest un-tested difference between Run A (74.4% on its own nominal plant)
+    and Run B/D (33.6% nominal, 21% under DR) is the control rate.
+
+    THE PRECEDENT. Squint (arXiv 2602.21203) trains SO-101 policies at 10 Hz and
+    then DEPLOYS them at 30 Hz, scaling actions down to compensate, explicitly
+    for "faster recovery control" and "smoother trajectories". 10 Hz is their
+    training-efficiency choice, not their control choice. so-frame keeps 10 Hz on
+    both sides, so the field is not unanimous - which is why this is measured
+    rather than assumed.
+
+    WHY IT SHOULD TRANSFER WITHOUT RETRAINING. The observation vector is
+    rate-invariant: joint_pos is a position, joint_vel is scaled to zero, and
+    last_action is whatever the policy last emitted. The action is an absolute
+    joint TARGET, not a delta, and the rate limit approaches that target at a
+    fixed 0.9 rad/s. So tripling the rate while thirding max_delta leaves the
+    plant's behaviour in CONTINUOUS TIME unchanged and simply gives the policy
+    three times as many chances to correct. It should be no worse, and if fine
+    control is what the 20 mm predicate is starved of, meaningfully better.
+
+    WHAT MOVES, and both are forced:
+      decimation 9 -> 3      30 Hz control, physics untouched at 90 Hz
+      max_delta 0.09 -> 0.03 holds joint speed at 0.9 rad/s - the same arm
+      delay_steps (1,2) -> (3,6)
+                             the measured lag is 101-202 ms. In STEPS that is 1-2
+                             at 10 Hz and 3-6 at 30. Leaving it at (1,2) would
+                             silently shrink the modelled lag to a third and make
+                             this a test of two things.
+
+    Read against Run D's 20.3% on Isaac-SO-ARM101-PickPlace-DR-D-v0. Same policy,
+    same randomization, same 8 s episode, same success predicate; only the rate.
+    """
+
+    MAX_DELTA = 0.03
+    DELAY_STEPS = (3, 6)
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.decimation = 3
+        self.sim.render_interval = self.decimation
+
+        self.actions.arm_action = pickplace_mdp.RateLimitedJointPositionActionCfg(
+            asset_name="robot",
+            joint_names=["shoulder_.*", "elbow_flex", "wrist_.*"],
+            scale=0.5,
+            use_default_offset=True,
+            max_delta=self.MAX_DELTA,
+            delay_steps=self.DELAY_STEPS,
+            joint_offset=self.JOINT_OFFSET,
+        )
+
+        # The two numbers this task exists to change. If an override silently
+        # resolved to the parent's, this would be a rerun of Run D's eval.
+        if self.decimation != 3 or self.actions.arm_action.max_delta != 0.03:
+            raise ValueError(
+                f"30 Hz eval requires decimation 3 and max_delta 0.03, resolved "
+                f"{self.decimation} and {self.actions.arm_action.max_delta}."
+            )
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_DR_D_30HZ_NOMINAL(SoArm101PickPlaceEnvCfg_DR_D_30HZ):
+    """EVALUATION ONLY: the 30 Hz plant with the randomization off.
+
+    The fourth corner of the 2x2 the other three tasks already cover, so the rate
+    effect and the DR effect can be separated instead of confounded:
+
+                        10 Hz              30 Hz
+        randomized      DR-D-v0            DR-D-30Hz-v0
+        nominal         DR-Nominal-v0      this
+
+    Run B's policy read 21.1% / 33.6% down the 10 Hz column, so DR costs 12.5
+    points there. If the 30 Hz column is shifted up by a similar amount at both
+    rows, the rate is a clean additive gain and the next run trains at 30 Hz. If
+    only the nominal row moves, the extra control resolution is being spent on
+    the nominal plant and eaten by randomization, which is a different problem.
+    """
+
+    DELAY_STEPS = (0, 0)
+    JOINT_OFFSET = 0.0
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.actions.arm_action = pickplace_mdp.RateLimitedJointPositionActionCfg(
+            asset_name="robot",
+            joint_names=["shoulder_.*", "elbow_flex", "wrist_.*"],
+            scale=0.5,
+            use_default_offset=True,
+            max_delta=self.MAX_DELTA,
+            delay_steps=self.DELAY_STEPS,
+            joint_offset=self.JOINT_OFFSET,
+        )
+
+        self.observations.policy.joint_pos.noise = None
+
+        self.events.randomize_actuator_gains = None
+        self.events.randomize_cube_mass = None
+        self.events.randomize_cube_friction = None
+        self.events.randomize_start_pose = None
