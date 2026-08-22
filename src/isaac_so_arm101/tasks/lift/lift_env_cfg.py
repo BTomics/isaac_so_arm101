@@ -182,6 +182,8 @@ class RewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
+    action_l2 = RewTerm(func=mdp.action_l2, weight=-1e-2)
+
 
 @configclass
 class TerminationsCfg:
@@ -204,6 +206,10 @@ class CurriculumCfg:
 
     joint_vel = CurrTerm(
         func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
+    )
+
+    action_l2 = CurrTerm(
+        func=mdp.modify_reward_weight, params={"term_name": "action_l2", "weight": -1e-1, "num_steps": 10000}
     )
 
 
