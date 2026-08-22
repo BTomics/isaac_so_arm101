@@ -123,3 +123,10 @@ class PickPlaceDRCPPORunnerCfg(PickPlaceDRPPORunnerCfg):
     """
 
     experiment_name = "pickplace_dr_c"
+
+
+@configclass
+class PickPlaceDRDPPORunnerCfg(PickPlaceDRCPPORunnerCfg):
+    """Run D's agent. Experiment name only; the change is in the env cfg."""
+
+    experiment_name = "pickplace_dr_d"

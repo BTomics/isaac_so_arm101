@@ -990,3 +990,90 @@ class SoArm101PickPlaceEnvCfg_DR_C_RESUME(SoArm101PickPlaceEnvCfg_DR_C):
 
         for term_name, weight in self.PINNED.items():
             getattr(self.rewards, term_name).weight = weight
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_DR_D(SoArm101PickPlaceEnvCfg_DR_C):
+    """Run D: transport is HORIZONTAL. One change - the crane, not the drag.
+
+    From watching play: the arm should pick up, lift, turn and lower. It picks up
+    and then contorts down to shuffle the cube along at table height. The reward
+    explains it exactly - object_goal_tracking measured a 3D norm to a goal on
+    the table, so lifting increased the distance the largest term in the stack
+    was minimising. Carrying 10 cm up cost 9.1/step against lifting_object's 3.0.
+    Net -6.1/step to stay low. See object_goal_distance_xy_latched.
+
+    Both tracking scales move to horizontal distance. object_at_target keeps its
+    xy x z kernel and becomes the only term that pays for the descent, which is
+    what makes the two jobs disjoint rather than opposed:
+
+        tracking (16) + fine (5)   get the cube OVER the goal
+        object_at_target (12)      bring it DOWN onto the goal
+
+    Nothing changes about the anti-slide latch, the thresholds, or any weight.
+
+    WATCH FOR:
+      - lift duty rising off 13.9%. That is the direct prediction. If it does not
+        move, this diagnosis is wrong and the trajectory is limited by something
+        other than the reward gradient.
+      - grasp_top_down finally becoming readable. It is gated on z > 0.03 and has
+        been structurally suppressed at 0.02 for three runs; a real carry height
+        is the first chance to see what the grasp angle actually is.
+      - the cube being carried high and DROPPED rather than placed. object_at_rest
+        and object_released both gate on object_at_target's z kernel, so a drop
+        from height pays nothing until it settles - but it is the failure mode
+        this change opens the door to, and it is what to look for in play.
+
+    NOT changed, deliberately: object_at_target's xy_std, which is 0.05 against a
+    20 mm success threshold and is the next lever. Shipping both would repeat
+    increment 1d's mistake of two changes in one run.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.rewards.object_goal_tracking.func = pickplace_mdp.object_goal_distance_xy_latched
+        self.rewards.object_goal_tracking_fine_grained.func = (
+            pickplace_mdp.object_goal_distance_xy_latched
+        )
+
+        # Same guard as Run C's: the swap must actually reach the terms, or this
+        # is an 11 h rerun of Run C under a different name.
+        for name in ("object_goal_tracking", "object_goal_tracking_fine_grained"):
+            func = getattr(self.rewards, name).func
+            if func is not pickplace_mdp.object_goal_distance_xy_latched:
+                raise ValueError(
+                    f"Run D requires {name} to use object_goal_distance_xy_latched, "
+                    f"resolved {func}. Without the swap this run repeats Run C."
+                )
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_DR_D_RESUME(SoArm101PickPlaceEnvCfg_DR_D):
+    """--resume for Run D, from Run C's checkpoint.
+
+    Resuming is the right call here even though the reward CHANGES shape: the
+    pick, the grasp and the release are all intact in Run C's policy and none of
+    them are touched. Only the transport gradient is. Expect a dip while the
+    carry re-forms, and do not read the first ~500 iterations.
+    """
+
+    PINNED = {"lifting_object": 3.0}
+
+    def __post_init__(self):
+        super().__post_init__()
+        for name, term in list(self.curriculum.__dict__.items()):
+            if term is None:
+                continue
+            target = term.params.get("term_name") if term.params else None
+            if target not in self.PINNED:
+                raise ValueError(
+                    f"Curriculum term {name!r} targets {target!r}, which is not in "
+                    f"SoArm101PickPlaceEnvCfg_DR_D_RESUME.PINNED. Add its converged "
+                    f"weight there before resuming, or the resumed run silently uses "
+                    f"the base weight."
+                )
+            setattr(self.curriculum, name, None)
+
+        for term_name, weight in self.PINNED.items():
+            getattr(self.rewards, term_name).weight = weight

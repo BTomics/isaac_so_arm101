@@ -134,6 +134,59 @@ def object_goal_distance_latched(
     return lifted * (1 - torch.tanh(distance / std))
 
 
+def object_goal_distance_xy_latched(
+    env: ManagerBasedRLEnv,
+    std: float,
+    lift_height: float,
+    command_name: str,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Goal tracking on the HORIZONTAL distance only. The crane, not the drag.
+
+    ``object_goal_distance_latched`` measures a 3D norm to a goal that sits on
+    the table at z ~ 0.015, so every centimetre of lift INCREASES the distance it
+    is minimising. With the weights Run B/C ran, holding the cube 10 cm directly
+    above the goal costs:
+
+        object_goal_tracking   weight 16   -4.4 / step
+        fine_grained           weight  5   -4.7 / step
+        lifting_object         weight  3   +3.0 / step
+                                           ---------
+                                            -6.1 / step
+
+    The policy was paid six per step to keep the cube ON THE TABLE while moving
+    it. It did not fail to learn a lift-turn-lower motion; it was trained out of
+    one. That is the low carry visible in play, the 13.9% lift duty, the drag on
+    hardware ("like the bottom of the jaw is touching the ground", 2026-08-21),
+    and grasp_top_down pinned near zero all run - that term is gated on z > 0.03
+    and the cube is barely ever that high.
+
+    Dropping the z component gives the two tracking scales DISJOINT jobs instead
+    of opposing ones:
+
+        object_goal_tracking / fine_grained   get over the goal   (this function)
+        object_at_target                      come down onto it   (xy x z kernel)
+
+    Nothing then penalises carrying high, ``lifting_object`` still pays 3 for
+    altitude, and the descent is worth 12. The cube also cannot be parked in the
+    air for credit: object_at_target, object_at_rest, object_released and
+    place_success all require it near table height.
+
+    The anti-slide latch is unchanged and still updated here (``update=True``),
+    so a cube pushed along the table earns nothing, exactly as before.
+    """
+    robot: RigidObject = env.scene[robot_cfg.name]
+    object: RigidObject = env.scene[object_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    des_pos_b = command[:, :3]
+    des_pos_w, _ = combine_frame_transforms(robot.data.root_state_w[:, :3], robot.data.root_state_w[:, 3:7], des_pos_b)
+    # HORIZONTAL distance only - the one line that differs from the 3D version.
+    distance = torch.norm(des_pos_w[:, :2] - object.data.root_pos_w[:, :2], dim=1)
+    lifted = object_was_lifted(env, lift_height, object_cfg, update=True)
+    return lifted * (1 - torch.tanh(distance / std))
+
+
 def object_ee_distance_before_lift(
     env: ManagerBasedRLEnv,
     std: float,

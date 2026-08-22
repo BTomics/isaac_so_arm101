@@ -203,3 +203,26 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+
+# Run D: transport tracking on horizontal distance only, so lifting the cube no
+# longer costs reward. Everything else is Run C.
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-DR-D-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_DR_D",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceDRDPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-DR-D-Resume-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_DR_D_RESUME",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceDRDPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
