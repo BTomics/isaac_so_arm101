@@ -130,3 +130,27 @@ class PickPlaceDRDPPORunnerCfg(PickPlaceDRCPPORunnerCfg):
     """Run D's agent. Experiment name only; the change is in the env cfg."""
 
     experiment_name = "pickplace_dr_d"
+
+
+@configclass
+class PickPlaceAPrimePPORunnerCfg(PickPlaceDRDPPORunnerCfg):
+    """Run A's agent, restated for the re-baseline. Nothing in the algorithm moves.
+
+    gamma 0.99, num_steps_per_env 24, batch and epochs exactly as Runs A-D had
+    them, so the result is attributable to the plant and the two reward fixes the
+    env cfg carries. The chain from PickPlaceAlignedPPORunnerCfg down to here has
+    only ever changed experiment_name and max_iterations, and this run keeps it
+    that way.
+
+    max_iterations 24000 because Run A never spent its budget: it was configured
+    for 24000 and its last checkpoint is model_11999. The metric was still
+    climbing there, so the second half is untested rather than known-useless.
+
+    WALL CLOCK: back at decimation 3, so roughly 1.3 s/iteration as Run A ran -
+    about 4.5 h to the 12000 gate and 9 h to the end, against Run B/C/D's ~13 h
+    for 12000 at decimation 9. Do not compare any of these curves to the 10 Hz
+    runs on the iteration axis; the iteration means a third of the task time.
+    """
+
+    experiment_name = "pickplace_aprime"
+    max_iterations = 24000

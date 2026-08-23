@@ -249,3 +249,27 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+
+# Run A': the 30 Hz nominal plant, trained rather than replayed. The rate x DR
+# square exonerated every plant hypothesis, so this re-baselines against Run A's
+# measured 51.4% on exactly this task. See SoArm101PickPlaceEnvCfg_APRIME.
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-APrime-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_APRIME",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceAPrimePPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-APrime-Resume-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_APRIME_RESUME",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceAPrimePPORunnerCfg",
+    },
+    disable_env_checker=True,
+)

@@ -1186,3 +1186,87 @@ class SoArm101PickPlaceEnvCfg_DR_D_30HZ_NOMINAL(SoArm101PickPlaceEnvCfg_DR_D_30H
         self.events.randomize_cube_mass = None
         self.events.randomize_cube_friction = None
         self.events.randomize_start_pose = None
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_APRIME(SoArm101PickPlaceEnvCfg_DR_D_30HZ_NOMINAL):
+    """Run A': the re-baseline. The 30 Hz nominal plant, TRAINED rather than replayed.
+
+    WHY THIS EXISTS. The rate x DR eval square (2026-08-23, 512 episodes, seed 0)
+    came back flat: Run D's policy scores 18.8-24.4% on ALL FOUR plants, including
+    the one Run A's policy scores 51.4% on. That kills every plant-side explanation
+    for the regression at once - the control rate (0.4 points between 30 and 10 Hz),
+    the randomization (0.4 points with it on or off at 30 Hz), the cube mass, and
+    the budget (Run D reached 18400 iterations; Run A stopped at 12000). Runs B-D
+    did not fail to transfer and did not fail to finish. They CONVERGED at ~22%.
+
+    So the next run does not test another plant hypothesis. It re-establishes a
+    baseline on the plant that works, carrying only the two defects that were
+    independently verified and are cheap to un-bundle.
+
+    THE PLANT IS UNCHANGED from the parent, deliberately - 30 Hz, max_delta 0.03,
+    the declared 25 g cube, no delay, no joint offset, no encoder noise, no draws.
+    That is exactly the task Run A's 51.4% was measured on, which is what makes
+    51.4% a gate rather than a vibe.
+
+    WHAT IT CARRIES FORWARD from the runs that failed, both from the env cfg and
+    neither re-litigated here:
+      - Run C's ACTION_L2 = -0.05. Run A ended saturated at |a| ~ 5.8 against a
+        clamp of 5.0; -0.01 held at ~2% of the reward stack and never bit.
+      - Run D's horizontal object_goal_tracking. The 3D norm to a table-height
+        goal paid the arm 6.1/step to keep the cube ON THE TABLE, which is why
+        grasp_top_down sat at 0.02 for three runs - it is gated on z > 0.03 and
+        the cube was never up there to be measured.
+
+    THE BUNDLE, stated rather than hidden. Two changes ship in one run, against
+    this project's own carryover. It is acceptable here and nowhere else because
+    the baseline is MEASURED on the same plant with the same predicate and seed:
+
+        A' >= 51.4% at 12000  ->  both fixes earned it; continue to 24000.
+        A' <  51.4% at 12000  ->  stop at the gate and split C from D. One run
+                                  lost instead of four.
+
+    Gate at model_11999 BEFORE spending the second half of the budget.
+
+    THE MECHANISM A' IS BETTING AGAINST, so it is falsifiable. Run B trained at
+    10 Hz with max_delta 0.09: a saturated policy moves 5.16 deg per joint per
+    step, against a success predicate that wants 20 mm. A policy whose action
+    granularity is coarser than its tolerance cannot learn terminal precision -
+    and replaying it at 30 Hz cannot add precision it never learned, which is
+    what the flat rate column says. Run C's breakdown agrees: 78% of the
+    at-target kernel mass has the gripper open and the cube at rest. The
+    behaviour is right; it misses the tolerance. If A' also lands at ~22%, this
+    mechanism is wrong and the suspect moves to the reward, not the plant.
+    """
+
+
+@configclass
+class SoArm101PickPlaceEnvCfg_APRIME_RESUME(SoArm101PickPlaceEnvCfg_APRIME):
+    """--resume for Run A', with the lifting_object decay pinned at its endpoint.
+
+    Same shape as the other _RESUME variants and for the same reason: the
+    curriculum's 15 -> 3 decay has already happened in the checkpoint, so leaving
+    the term live restarts it from 15 and the resumed run is not the run that was
+    interrupted. A fresh run at 3.0 from step zero never bootstraps a pick, which
+    is why the pin lives here and not in the base config.
+    """
+
+    PINNED = {"lifting_object": 3.0}
+
+    def __post_init__(self):
+        super().__post_init__()
+        for name, term in list(self.curriculum.__dict__.items()):
+            if term is None:
+                continue
+            target = term.params.get("term_name") if term.params else None
+            if target not in self.PINNED:
+                raise ValueError(
+                    f"Curriculum term {name!r} targets {target!r}, which is not in "
+                    f"SoArm101PickPlaceEnvCfg_APRIME_RESUME.PINNED. Add its converged "
+                    f"weight there before resuming, or the resumed run silently uses "
+                    f"the base weight."
+                )
+            setattr(self.curriculum, name, None)
+
+        for term_name, weight in self.PINNED.items():
+            getattr(self.rewards, term_name).weight = weight
