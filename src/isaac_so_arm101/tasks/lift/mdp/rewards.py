@@ -86,3 +86,8 @@ def object_ee_distance_and_lifted(
     lift_reward = object_is_lifted(env, minimal_height, object_cfg)
     # Combine rewards multiplicatively
     return reach_reward * lift_reward
+
+
+def action_l2(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Penalize the magnitude of actions."""
+    return torch.mean(torch.square(env.action_manager.action), dim=1)
