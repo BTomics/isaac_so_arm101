@@ -273,3 +273,28 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+
+# A' on the plant whose joint limits hold. Deliberately REUSES the APRIME env cfg
+# classes rather than subclassing them: the environment is identical and the only
+# difference is the plant underneath it, so giving it its own class would create a
+# second place for the task to drift. See PickPlaceAPrime2PPORunnerCfg.
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-APrime2-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_APRIME",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceAPrime2PPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Isaac-SO-ARM101-PickPlace-APrime2-Resume-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:SoArm101PickPlaceEnvCfg_APRIME_RESUME",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PickPlaceAPrime2PPORunnerCfg",
+    },
+    disable_env_checker=True,
+)

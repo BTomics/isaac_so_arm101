@@ -154,3 +154,32 @@ class PickPlaceAPrimePPORunnerCfg(PickPlaceDRDPPORunnerCfg):
 
     experiment_name = "pickplace_aprime"
     max_iterations = 24000
+
+
+@configclass
+class PickPlaceAPrime2PPORunnerCfg(PickPlaceAPrimePPORunnerCfg):
+    """A' retrained on the plant that enforces its own joint limits.
+
+    WHY A NEW NAME FOR AN IDENTICAL CONFIG. `pickplace_aprime` now means two
+    different plants: the one where wrist_flex spent 23.9% of steps up to 1.073
+    rad past its hard stop, and the one after armature, 32 solver position
+    iterations and a 1.0 m/s depenetration cap made the constraint hold. Same
+    task id, same log directory, incomparable results. Every expensive mistake on
+    this project has been two things sharing one name, so they get two.
+
+    The gap is not cosmetic: replayed on the fixed plant, A's own checkpoint drops
+    from 79.9% to ZERO placements, with 12 lifted steps in 15360. The exploit was
+    not a contributor to that score, it was the policy.
+
+    max_iterations 12000, not 24000. A' scored 79.7% at 12000 and 79.9% at 24000 -
+    the second 4.5 hours bought 0.2 points on the rate, while the place_success
+    TIME-FRACTION rose 0.415 -> 0.445. It learned to place sooner, not more often.
+    Resume past 12000 only if the eval is still moving; the -Resume-v0 twin is
+    there for that and makes continuing a deliberate act rather than a default.
+
+    Nothing else moves. Same env cfg class, same rewards, same gamma, same batch.
+    The plant fix IS the change under test.
+    """
+
+    experiment_name = "pickplace_aprime2"
+    max_iterations = 12000
