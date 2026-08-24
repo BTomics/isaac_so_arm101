@@ -6,6 +6,26 @@ from isaaclab.assets.articulation import ArticulationCfg
 
 TEMPLATE_ASSETS_DATA_DIR = Path(__file__).resolve().parent
 
+# Reflected rotor inertia, kg m^2, seen at the joint: I_rotor * N^2.
+#
+# WHY IT IS HERE AT ALL: a rollout of the A' policy recorded wrist_flex 1.073 rad
+# (61 deg) PAST its hard limit on 23.9% of steps, while the drive never commanded
+# a target below that limit - 0.0% of commanded targets were below it. So the
+# joint was being forced through its stop by contact, and PhysX was not holding
+# the constraint. A joint with no armature is the standard way that happens: with
+# zero rotor inertia the effective mass at a light distal link is tiny, and a
+# stiff implicit drive plus a contact impulse wins against a position constraint
+# solved in a finite number of iterations.
+#
+# THE NUMBER IS AN ESTIMATE, not a measurement. The STS3215's reduction is ~1:345,
+# so N^2 ~ 1.2e5, and small DC rotors run 1e-7..1e-6 kg m^2 - which brackets the
+# reflected value at 0.012..0.12. 0.02 sits at the low end of that bracket
+# deliberately: too much armature makes the arm sluggish in a way the real servo
+# is not, and the failure it is here to fix shows up long before the top of the
+# range. VALIDATE IT with scripts/limit_probe.py rather than trusting the
+# arithmetic - the bracket spans a factor of ten.
+ARMATURE = 0.02
+
 ##
 # Configuration
 ##
@@ -18,11 +38,15 @@ SO_ARM101_CFG = ArticulationCfg(
         activate_contact_sensors=False, # set as false while waiting for capsule implementation
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
-            max_depenetration_velocity=5.0,
+            # 5.0 m/s of depenetration can hurl a light distal joint through its
+            # stop when a capsule approximation interpenetrates in a folded pose.
+            max_depenetration_velocity=1.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=True,
-            solver_position_iteration_count=8,
+            # Joint limits are POSITION constraints. 8 iterations was thin for a
+            # stiff implicit drive against a contact; 32 is what holds them.
+            solver_position_iteration_count=32,
             solver_velocity_iteration_count=0,
         ),
         joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
@@ -53,6 +77,7 @@ SO_ARM101_CFG = ArticulationCfg(
             joint_names_expr=["shoulder_.*", "elbow_flex", "wrist_.*"],
             effort_limit_sim=1.9,
             velocity_limit_sim=1.5,
+            armature=ARMATURE,
             stiffness={
                 "shoulder_pan": 200.0,  # Highest - moves all mass
                 "shoulder_lift": 170.0,  # Slightly less than rotation
@@ -72,6 +97,7 @@ SO_ARM101_CFG = ArticulationCfg(
             joint_names_expr=["gripper"],
             effort_limit_sim=2.5,  # Increased from 1.9 to 2.5 for stronger grip
             velocity_limit_sim=1.5,
+            armature=ARMATURE,
             stiffness=60.0,  # Increased from 25.0 to 60.0 for more reliable closing
             damping=20.0,  # Increased from 10.0 to 20.0 for stability
         ),
