@@ -12,19 +12,23 @@ be read on the laptop from a file the VM produced.
 
 WHAT IT REPORTS
 
-  1. JOINT TRAVEL against the limits the SIM ENFORCED, per joint: the range used, and how
-     much of the rollout sits inside --margin of a limit. wrist_flex is the one
-     to look at: its home is 1.57 against a limit of 1.65806, so it has 0.088 rad
-     of travel one way and 3.23 the other while every other joint sits mid-range.
-     If the carry lives against that stop, the folded posture is kinematic and a
-     reward weight will not move it.
+  1. JOINT TRAVEL against the limits the SIM ENFORCED, per joint: the range used,
+     how much of it sits inside --margin of a limit, and - separately - how much
+     is OUTSIDE one. Those are different findings. Sitting against a stop is
+     kinematics, and moving the home pose answers it. Passing THROUGH a stop is
+     the constraint failing, which is what the A' rollout showed on wrist_flex
+     (1.073 rad past, 23.9% of steps, with 0.0% of commanded targets asking for
+     it), and no reward weight answers that one.
 
   2. COMMANDED TARGETS outside the limits - what the policy ASKED for versus what
      the joint can do. A target the simulator clamps is a target the bridge will
      also clamp, and a policy steering through a clamp is steering a plant it
      cannot feel.
 
-  3. GRASP GEOMETRY: cos_down and the jaw aperture, split by whether the cube is
+  3. GRASP GEOMETRY: cos_down and the jaw aperture, split by PHASE - the approach
+     onto the cube, and the carry after it leaves the table. A good grasp that
+     degrades in transport and a bad grasp throughout look identical in an
+     average over both, and they have no fix in common. Split by whether the cube is
      lifted and whether the end-effector is on it. cos_down here is the ANGLE
      ITSELF, not the grasp_top_down reward - that term multiplies the angle by a
      proximity kernel, so inverting the logged average gives a lower bound and
@@ -57,6 +61,32 @@ def urdf_limits(path: pathlib.Path) -> dict[str, tuple[float, float]]:
         if lower is None or upper is None:
             continue
         out[name] = (float(lower), float(upper))
+    return out
+
+
+def before_first_lift(lifted: np.ndarray, done: np.ndarray) -> np.ndarray:
+    """Steps in each episode BEFORE the cube first leaves the table.
+
+    Separating the approach from the carry is the whole point: "on the cube" also
+    matches the moment AFTER a place, when the end-effector is still near a cube
+    that is back on the table. Lumping those together reads a good grasp and a bad
+    carry as one mediocre average, which is how a transport-only defect hides.
+
+    Episodes are segmented on `done`, which dump_rollout records AFTER the step,
+    so a True at index t ends the episode containing t.
+    """
+    steps, envs = lifted.shape
+    out = np.zeros_like(lifted)
+    for e in range(envs):
+        start = 0
+        for t in range(steps):
+            if done[t, e] or t == steps - 1:
+                seg = slice(start, t + 1)
+                idx = np.flatnonzero(lifted[seg, e])
+                # No lift in this episode: every step of it is still "before" one.
+                cut = (start + idx[0]) if idx.size else (t + 1)
+                out[start:cut, e] = True
+                start = t + 1
     return out
 
 
@@ -154,10 +184,12 @@ def main() -> int:
     gripper = q[:, :, names.index("gripper")] if "gripper" in names else np.full_like(cos_down, np.nan)
     closed = gripper <= args.gripper_open
     carrying = lifted & on_cube
+    approach = before_first_lift(lifted, done) & on_cube
 
     print("\nGRASP GEOMETRY")
     print(f"{'window':<28}{'steps':>10}{'cos_down p5':>14}{'p50':>10}{'p95':>10}{'jaw closed':>13}")
     for label, mask in (("all steps", np.ones_like(lifted)),
+                        ("on the cube, pre-lift", approach),
                         ("cube lifted", lifted),
                         ("lifted AND on the cube", carrying)):
         n = int(mask.sum())
@@ -174,10 +206,21 @@ def main() -> int:
 
     if carrying.sum():
         med = float(np.median(cos_down[carrying]))
+        deg = np.degrees(np.arccos(np.clip(med, -1, 1)))
         if med < 0.3:
             print(f"\n  VERDICT: median cos_down {med:+.2f} while carrying - "
-                  f"{np.degrees(np.arccos(np.clip(med, -1, 1))):.0f} deg off vertical. "
-                  f"Not a top-down grasp.")
+                  f"{deg:.0f} deg off vertical. Not a top-down grasp.")
+        if approach.sum():
+            app = float(np.median(cos_down[approach]))
+            app_deg = np.degrees(np.arccos(np.clip(app, -1, 1)))
+            print(f"  approach {app:+.2f} ({app_deg:.0f} deg) -> carry {med:+.2f} ({deg:.0f} deg)")
+            # Which phase owns the defect decides what the next run changes: a bad
+            # approach is a reach/kinematics problem, a good approach that degrades
+            # is a transport one, and they have no fix in common.
+            if app - med > 0.5:
+                print("  The grasp is the better of the two. The inversion is a TRANSPORT "
+                      "behaviour, so it is priced by what pays during the carry - not by "
+                      "the home pose the approach starts from.")
     return 0
 
 
