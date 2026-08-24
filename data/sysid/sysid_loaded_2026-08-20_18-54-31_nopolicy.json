@@ -1,0 +1,46 @@
+{
+  "hz": 30.0,
+  "joints": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll"
+  ],
+  "amplitude": 0.3,
+  "periods": [
+    12.0,
+    8.0,
+    4.0,
+    2.0
+  ],
+  "home": [
+    0.0,
+    0.0,
+    0.0,
+    1.57,
+    0.0
+  ],
+  "loaded": true,
+  "gripper_rad": 0.3,
+  "label": "sysid_loaded",
+  "policy_path": null,
+  "policy_sha": "nopolicy",
+  "git_rev": "da1f783",
+  "started_utc": "2026-08-20T18:47:23",
+  "rate": {
+    "ticks": 12082,
+    "hz_mean": 29.674868668380704,
+    "dt_mean_ms": 33.69854846453034,
+    "dt_max_ms": 43.76179998507723,
+    "dt_p95_ms": 34.01319999829866
+  },
+  "ticks": 12082,
+  "duration_s": 407.11222270000144,
+  "widths": {
+    "obs": 0,
+    "action_raw": 0,
+    "target_sent": 6,
+    "encoders": 6
+  }
+}
