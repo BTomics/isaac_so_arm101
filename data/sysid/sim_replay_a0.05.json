@@ -1,0 +1,49 @@
+{
+  "hz": 30.0,
+  "joints": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll"
+  ],
+  "amplitude": 0.3,
+  "periods": [
+    12.0,
+    8.0,
+    4.0,
+    2.0
+  ],
+  "home": [
+    0.0,
+    0.0,
+    0.0,
+    1.57,
+    0.0
+  ],
+  "loaded": false,
+  "gripper_rad": 1.0,
+  "label": "sim_replay",
+  "policy_path": null,
+  "policy_sha": "nopolicy",
+  "git_rev": "da1f783",
+  "started_utc": "2026-08-20T18:37:38",
+  "rate": {
+    "ticks": 12082,
+    "hz_mean": 29.674852887456492,
+    "dt_mean_ms": 33.69856638523382,
+    "dt_max_ms": 43.87140000471845,
+    "dt_p95_ms": 33.98080001352355
+  },
+  "ticks": 12082,
+  "duration_s": 407.1123903999978,
+  "widths": {
+    "obs": 0,
+    "action_raw": 0,
+    "target_sent": 6,
+    "encoders": 6
+  },
+  "source_sweep": "data/sysid/sysid_unloaded_2026-08-20_18-44-37_nopolicy.npz",
+  "sim_task": "Isaac-SO-ARM101-PickPlace-APrime-v0",
+  "armature": 0.05
+}
