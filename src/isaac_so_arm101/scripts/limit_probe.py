@@ -142,18 +142,33 @@ def main():
     print(f"{'joint':<16}{'dir':>7}{'limit':>10}{'commanded':>12}{'reached':>10}{'overshoot':>12}   verdict")
 
     failures = 0
+    not_reached = 0
     for name in wanted:
         j = names.index(name)
         lo, hi = float(limits[j, 0]), float(limits[j, 1])
         for direction, commanded, reached, over in probe(env, robot, scene, sim, j, name, lo, hi, args_cli):
-            verdict = "held" if over <= args_cli.tol else "FAIL"
+            # A joint that never ARRIVED at its stop did not test it. Gravity beats
+            # effort_limit_sim long before the upper stop on the proximal joints, and
+            # calling that "held" reports an untested constraint as a passing one.
+            if over < -args_cli.tol:
+                verdict, untested = f"NOT REACHED (short by {-over:.3f})", True
+            elif over <= args_cli.tol:
+                verdict, untested = "held", False
+            else:
+                verdict, untested = "FAIL", False
             failures += verdict == "FAIL"
+            not_reached += untested
             limit = lo if direction == "lower" else hi
             print(f"{name:<16}{direction:>7}{limit:>10.3f}{commanded:>12.3f}"
                   f"{reached:>10.3f}{over:>12.4f}   {verdict}")
 
-    print(f"\n{failures} of {2 * len(wanted)} stops let the joint through by more than {args_cli.tol} rad.")
-    if not failures:
+    total = 2 * len(wanted)
+    print(f"\n{failures} of {total} stops let the joint through by more than {args_cli.tol} rad.")
+    if not_reached:
+        print(f"{not_reached} of {total} were NOT REACHED - the joint never got to the stop, so "
+              f"that constraint is untested here, not passing.\nThose are gravity against "
+              f"effort_limit_sim; reaching them needs a pose with a shorter moment arm.")
+    if not failures and not not_reached:
         print("A clean sweep here means the limit holds under a drive commanding through it.\n"
               "It does NOT mean the limit cannot be violated - see this script's docstring.")
 
