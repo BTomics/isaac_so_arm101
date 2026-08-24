@@ -130,6 +130,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     obj = unwrapped.scene["object"]
     joint_idx = [robot.joint_names.index(n) for n in JOINTS]
 
+    # The limits the SIMULATOR enforces, not the ones the URDF declares. These
+    # disagree whenever the URDF->USD conversion drops a limit, and a joint can
+    # also be dragged THROUGH a hard limit under load, since PhysX solves limits
+    # as constraints with finite iterations. Reading joint travel against the
+    # wrong reference is how a broken plant reads as a policy pathology.
+    sim_limits = robot.data.joint_pos_limits[0, joint_idx].cpu().numpy()
+    soft_limits = robot.data.soft_joint_pos_limits[0, joint_idx].cpu().numpy()
+    print("[INFO]: enforced joint limits (hard | soft):")
+    for name, hard, soft in zip(JOINTS, sim_limits, soft_limits):
+        print(f"    {name:<16}{hard[0]:+.4f}..{hard[1]:+.4f}   {soft[0]:+.4f}..{soft[1]:+.4f}")
+
     approach_local = torch.tensor(_GRIPPER_APPROACH_LOCAL, device=unwrapped.device, dtype=torch.float32)
     approach_local = approach_local / torch.norm(approach_local)
 
@@ -175,6 +186,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     np.savez_compressed(
         out,
         joint_names=np.array(JOINTS),
+        sim_limits=sim_limits,
+        soft_limits=soft_limits,
         task=np.array(args_cli.task),
         checkpoint=np.array(resume_path),
         **arrays,

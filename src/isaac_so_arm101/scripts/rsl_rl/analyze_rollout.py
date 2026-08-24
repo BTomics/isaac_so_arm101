@@ -12,7 +12,7 @@ be read on the laptop from a file the VM produced.
 
 WHAT IT REPORTS
 
-  1. JOINT TRAVEL against the URDF limits, per joint: the range used, and how
+  1. JOINT TRAVEL against the limits the SIM ENFORCED, per joint: the range used, and how
      much of the rollout sits inside --margin of a limit. wrist_flex is the one
      to look at: its home is 1.57 against a limit of 1.65806, so it has 0.088 rad
      of travel one way and 3.23 the other while every other joint sits mid-range.
@@ -93,12 +93,28 @@ def main() -> int:
     print(f"checkpoint  {data['checkpoint']}")
     print(f"rollout     {steps} steps x {envs} envs, {int(done.sum())} episode boundaries\n")
 
-    limits = urdf_limits(pathlib.Path(args.urdf))
+    # Prefer the limits the simulator ENFORCED, recorded at rollout time. The URDF
+    # only declares: the URDF->USD conversion can change a limit, and PhysX solves
+    # limits as constraints, so a joint under load can be dragged through one.
+    # Measuring travel against a limit that was not the operative one is how a
+    # broken plant reads as a policy pathology.
+    if "sim_limits" in data.files:
+        source = "sim (enforced)"
+        limits = {n: (float(lo), float(hi)) for n, (lo, hi) in zip(names, data["sim_limits"])}
+        declared = urdf_limits(pathlib.Path(args.urdf))
+        for n in names:
+            u, e = declared.get(n), limits.get(n)
+            if u and e and (abs(u[0] - e[0]) > 1e-3 or abs(u[1] - e[1]) > 1e-3):
+                print(f"!! {n}: URDF declares {u[0]:+.4f}..{u[1]:+.4f} but the sim "
+                      f"enforces {e[0]:+.4f}..{e[1]:+.4f} - the conversion changed it")
+    else:
+        source = "URDF (declared; this dump predates sim_limits)"
+        limits = urdf_limits(pathlib.Path(args.urdf))
     missing = [n for n in names if n not in limits]
     if missing:
-        print(f"!! no URDF limit for {missing} - reported as nan rather than assumed\n")
+        print(f"!! no limit for {missing} - reported as nan rather than assumed\n")
 
-    print("JOINT TRAVEL vs URDF limit")
+    print(f"JOINT TRAVEL vs limit, source: {source}")
     print(f"{'joint':<16}{'limit':>18}{'used (p1..p99)':>22}{'at lower':>10}{'at upper':>10}")
     for j, name in enumerate(names):
         col = q[:, :, j].ravel()
@@ -106,7 +122,14 @@ def main() -> int:
         p1, _, p99 = percentiles(col)
         at_lo = float(np.mean(col <= lo + args.margin)) if np.isfinite(lo) else float("nan")
         at_hi = float(np.mean(col >= hi - args.margin)) if np.isfinite(hi) else float("nan")
+        # Outside the limit is not travel, it is the constraint failing. Reported
+        # separately because "at the stop" and "through the stop" have different
+        # causes and different fixes.
+        beyond = float(np.mean((col < lo) | (col > hi))) if np.isfinite(lo) else float("nan")
         flag = "  <<<" if (np.isfinite(at_hi) and max(at_lo, at_hi) > 0.10) else ""
+        if np.isfinite(beyond) and beyond > 0.01:
+            worst = max(float(lo - col.min()), float(col.max() - hi))
+            flag = f"  VIOLATED {beyond:.1%} by up to {worst:.3f}"
         print(f"{name:<16}{lo:>8.3f}..{hi:<8.3f}{p1:>10.3f}..{p99:<10.3f}"
               f"{at_lo:>9.1%}{at_hi:>10.1%}{flag}")
 
